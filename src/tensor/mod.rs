@@ -1037,4 +1037,118 @@ mod tests {
             RustGradError::InvalidAxis { axis: 2, rank: 2 }
         );
     }
+
+    #[test]
+    fn multiplies_square_matrices() {
+        let left = Tensor::matrix(2, 2, vec![1.0, 2.0, 3.0, 4.0]).expect("valid left matrix");
+        let right = Tensor::matrix(2, 2, vec![5.0, 6.0, 7.0, 8.0]).expect("valid right matrix");
+
+        let output = left.matmul(&right).expect("matmul should succeed");
+
+        assert_eq!(output.dims(), &[2, 2]);
+        assert_eq!(output.data(), &[19.0, 22.0, 43.0, 50.0]);
+    }
+
+    #[test]
+    fn multiplies_rectangular_matrices() {
+        let left =
+            Tensor::matrix(2, 3, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).expect("valid left matrix");
+        let right = Tensor::matrix(3, 2, vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0])
+            .expect("valid right matrix");
+
+        let output = left.matmul(&right).expect("matmul should succeed");
+
+        assert_eq!(output.dims(), &[2, 2]);
+        assert_eq!(output.data(), &[58.0, 64.0, 139.0, 154.0]);
+    }
+
+    #[test]
+    fn matrix_multiplication_preserves_values_with_identity_matrix() {
+        let left = Tensor::matrix(2, 2, vec![3.0, 4.0, 5.0, 6.0]).expect("valid matrix");
+        let identity = Tensor::matrix(2, 2, vec![1.0, 0.0, 0.0, 1.0]).expect("valid identity");
+
+        let output = left.matmul(&identity).expect("matmul should succeed");
+
+        assert_eq!(output.dims(), &[2, 2]);
+        assert_eq!(output.data(), &[3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn rejects_matrix_multiplication_with_mismatched_inner_dimensions() {
+        let left =
+            Tensor::matrix(2, 3, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).expect("valid left matrix");
+        let right = Tensor::matrix(2, 2, vec![1.0, 2.0, 3.0, 4.0]).expect("valid right matrix");
+
+        assert_eq!(
+            left.matmul(&right)
+                .expect_err("inner dimensions should not match"),
+            RustGradError::MatMulShapeMismatch {
+                left: vec![2, 3],
+                right: vec![2, 2],
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_matrix_multiplication_when_left_operand_is_not_matrix() {
+        let left = Tensor::vector(vec![1.0, 2.0]).expect("valid vector");
+        let right = Tensor::matrix(2, 1, vec![3.0, 4.0]).expect("valid matrix");
+
+        assert_eq!(
+            left.matmul(&right).expect_err("left operand is rank 1"),
+            RustGradError::InvalidArgument {
+                name: "left",
+                reason: "matmul expects rank 2, got rank 1".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_matrix_multiplication_when_right_operand_is_not_matrix() {
+        let left = Tensor::matrix(1, 2, vec![1.0, 2.0]).expect("valid matrix");
+        let right = Tensor::vector(vec![3.0, 4.0]).expect("valid vector");
+
+        assert_eq!(
+            left.matmul(&right).expect_err("right operand is rank 1"),
+            RustGradError::InvalidArgument {
+                name: "right",
+                reason: "matmul expects rank 2, got rank 1".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_vector_reduction_with_invalid_axis() {
+        let tensor = Tensor::vector(vec![1.0, 2.0, 3.0]).expect("valid vector");
+
+        assert_eq!(
+            tensor.sum_axis(1).expect_err("axis one is invalid"),
+            RustGradError::InvalidAxis { axis: 1, rank: 1 }
+        );
+    }
+
+    #[test]
+    fn rejects_reduction_for_rank_three_tensor() {
+        let tensor = Tensor::from_vec(vec![1, 1, 2], vec![3.0, 4.0]).expect("valid rank 3 tensor");
+
+        assert_eq!(
+            tensor.sum_axis(0).expect_err("rank three is unsupported"),
+            RustGradError::InvalidArgument {
+                name: "rank",
+                reason: "sum_axis supports rank 1 or 2, got rank 3".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn mean_axis_for_vector_returns_scalar_like_mean() {
+        let tensor = Tensor::vector(vec![2.0, 4.0, 6.0]).expect("valid vector");
+
+        let output = tensor
+            .mean_axis(0)
+            .expect("axis zero should average vector");
+
+        assert_eq!(output.dims(), &[1]);
+        assert_eq!(output.data(), &[4.0]);
+    }
 }
