@@ -249,3 +249,170 @@ impl Tensor {
         self.shape.cols()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Shape, Tensor};
+    use crate::RustGradError;
+
+    #[test]
+    fn creates_valid_shape_metadata() {
+        let shape = Shape::new(vec![2, 3, 4]).expect("shape should be valid");
+
+        assert_eq!(shape.dims(), &[2, 3, 4]);
+        assert_eq!(shape.to_vec(), vec![2, 3, 4]);
+        assert_eq!(shape.rank(), 3);
+        assert_eq!(shape.element_count(), 24);
+        assert!(!shape.is_scalar_like());
+        assert!(!shape.is_vector());
+        assert!(!shape.is_matrix());
+        assert_eq!(shape.rows(), None);
+        assert_eq!(shape.cols(), None);
+    }
+
+    #[test]
+    fn creates_scalar_vector_and_matrix_shapes() {
+        let scalar = Shape::scalar();
+        let vector = Shape::vector(5).expect("vector shape should be valid");
+        let matrix = Shape::matrix(2, 3).expect("matrix shape should be valid");
+
+        assert_eq!(scalar.dims(), &[1]);
+        assert!(scalar.is_scalar_like());
+        assert_eq!(vector.dims(), &[5]);
+        assert!(vector.is_vector());
+        assert_eq!(matrix.dims(), &[2, 3]);
+        assert!(matrix.is_matrix());
+        assert_eq!(matrix.rows(), Some(2));
+        assert_eq!(matrix.cols(), Some(3));
+    }
+
+    #[test]
+    fn rejects_empty_shape() {
+        let error = Shape::new(Vec::<usize>::new()).expect_err("empty shape should fail");
+
+        assert_eq!(error, RustGradError::EmptyShape);
+    }
+
+    #[test]
+    fn rejects_zero_dimension_shape() {
+        let error = Shape::new(vec![2, 0, 4]).expect_err("zero dimension should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::InvalidArgument {
+                name: "dims",
+                reason: "dimension 1 must be greater than zero".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn converts_shape_into_dimension_vector() {
+        let shape = Shape::matrix(3, 2).expect("matrix shape should be valid");
+        let dims: Vec<usize> = shape.into();
+
+        assert_eq!(dims, vec![3, 2]);
+    }
+
+    #[test]
+    fn creates_tensor_from_shape_and_data() {
+        let shape = Shape::matrix(2, 2).expect("matrix shape should be valid");
+        let tensor = Tensor::new(shape, vec![1.0, 2.0, 3.0, 4.0]).expect("tensor should be valid");
+
+        assert_eq!(tensor.dims(), &[2, 2]);
+        assert_eq!(tensor.shape().element_count(), 4);
+        assert_eq!(tensor.rank(), 2);
+        assert_eq!(tensor.len(), 4);
+        assert!(!tensor.is_empty());
+        assert_eq!(tensor.data(), &[1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(tensor.rows(), Some(2));
+        assert_eq!(tensor.cols(), Some(2));
+    }
+
+    #[test]
+    fn creates_tensor_from_raw_dimensions() {
+        let tensor =
+            Tensor::from_vec(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).expect("valid tensor");
+
+        assert_eq!(tensor.dims(), &[2, 3]);
+        assert_eq!(tensor.data(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn creates_scalar_vector_and_matrix_tensors() {
+        let scalar = Tensor::scalar(3.5).expect("scalar tensor should be valid");
+        let vector = Tensor::vector(vec![1.0, 2.0, 3.0]).expect("vector tensor should be valid");
+        let matrix =
+            Tensor::matrix(2, 2, vec![1.0, 2.0, 3.0, 4.0]).expect("matrix tensor should be valid");
+
+        assert_eq!(scalar.dims(), &[1]);
+        assert_eq!(scalar.data(), &[3.5]);
+        assert_eq!(vector.dims(), &[3]);
+        assert_eq!(vector.data(), &[1.0, 2.0, 3.0]);
+        assert_eq!(matrix.dims(), &[2, 2]);
+        assert_eq!(matrix.data(), &[1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn creates_filled_tensors() {
+        let zeros = Tensor::zeros(vec![2, 3]).expect("zeros tensor should be valid");
+        let ones = Tensor::ones(vec![2, 2]).expect("ones tensor should be valid");
+        let full = Tensor::full(vec![3], 7.0).expect("full tensor should be valid");
+
+        assert_eq!(zeros.data(), &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(ones.data(), &[1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(full.data(), &[7.0, 7.0, 7.0]);
+    }
+
+    #[test]
+    fn rejects_tensor_with_empty_data() {
+        let shape = Shape::vector(3).expect("shape should be valid");
+        let error = Tensor::new(shape, Vec::new()).expect_err("empty tensor should fail");
+
+        assert_eq!(error, RustGradError::EmptyTensor);
+    }
+
+    #[test]
+    fn rejects_shape_data_length_mismatch() {
+        let error =
+            Tensor::matrix(2, 3, vec![1.0, 2.0, 3.0]).expect_err("data length should not match");
+
+        assert_eq!(
+            error,
+            RustGradError::ShapeDataMismatch {
+                shape: vec![2, 3],
+                expected_len: 6,
+                actual_len: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_vector_constructor_with_empty_values() {
+        let error = Tensor::vector(Vec::new()).expect_err("empty vector tensor should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::InvalidArgument {
+                name: "dims",
+                reason: "dimension 0 must be greater than zero".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn allows_mutating_dense_data() {
+        let mut tensor = Tensor::ones(vec![3]).expect("tensor should be valid");
+
+        tensor.data_mut()[1] = 5.0;
+
+        assert_eq!(tensor.data(), &[1.0, 5.0, 1.0]);
+    }
+
+    #[test]
+    fn consumes_tensor_into_data() {
+        let tensor = Tensor::vector(vec![2.0, 4.0, 6.0]).expect("tensor should be valid");
+
+        assert_eq!(tensor.into_data(), vec![2.0, 4.0, 6.0]);
+    }
+}
