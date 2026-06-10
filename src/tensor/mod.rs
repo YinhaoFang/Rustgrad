@@ -689,4 +689,119 @@ mod tests {
         assert_eq!(flattened.dims(), &[4]);
         assert_eq!(flattened.data(), &[1.0, 2.0, 3.0, 4.0]);
     }
+
+    #[test]
+    fn adds_tensors_with_same_shape() {
+        let left = Tensor::vector(vec![1.0, 2.0, 3.0]).expect("valid left tensor");
+        let right = Tensor::vector(vec![4.0, 5.0, 6.0]).expect("valid right tensor");
+
+        let output = left.add(&right).expect("matching shapes should add");
+
+        assert_eq!(output.dims(), &[3]);
+        assert_eq!(output.data(), &[5.0, 7.0, 9.0]);
+    }
+
+    #[test]
+    fn subtracts_tensors_with_same_shape() {
+        let left = Tensor::matrix(2, 2, vec![9.0, 7.0, 5.0, 3.0]).expect("valid left tensor");
+        let right = Tensor::matrix(2, 2, vec![1.0, 2.0, 3.0, 4.0]).expect("valid right tensor");
+
+        let output = left.sub(&right).expect("matching shapes should subtract");
+
+        assert_eq!(output.dims(), &[2, 2]);
+        assert_eq!(output.data(), &[8.0, 5.0, 2.0, -1.0]);
+    }
+
+    #[test]
+    fn multiplies_tensors_with_same_shape() {
+        let left = Tensor::vector(vec![2.0, 3.0, 4.0]).expect("valid left tensor");
+        let right = Tensor::vector(vec![5.0, 6.0, 7.0]).expect("valid right tensor");
+
+        let output = left.mul(&right).expect("matching shapes should multiply");
+
+        assert_eq!(output.dims(), &[3]);
+        assert_eq!(output.data(), &[10.0, 18.0, 28.0]);
+    }
+
+    #[test]
+    fn divides_tensors_with_same_shape() {
+        let left = Tensor::vector(vec![12.0, 9.0, 8.0]).expect("valid left tensor");
+        let right = Tensor::vector(vec![3.0, 3.0, 2.0]).expect("valid right tensor");
+
+        let output = left.div(&right).expect("matching shapes should divide");
+
+        assert_eq!(output.dims(), &[3]);
+        assert_eq!(output.data(), &[4.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn broadcasts_right_scalar_like_tensor() {
+        let left = Tensor::matrix(2, 2, vec![1.0, 2.0, 3.0, 4.0]).expect("valid matrix");
+        let right = Tensor::scalar(10.0).expect("valid scalar");
+
+        let output = left.add(&right).expect("right scalar should broadcast");
+
+        assert_eq!(output.dims(), &[2, 2]);
+        assert_eq!(output.data(), &[11.0, 12.0, 13.0, 14.0]);
+    }
+
+    #[test]
+    fn broadcasts_left_scalar_like_tensor() {
+        let left = Tensor::scalar(2.0).expect("valid scalar");
+        let right = Tensor::vector(vec![3.0, 4.0, 5.0]).expect("valid vector");
+
+        let output = left.mul(&right).expect("left scalar should broadcast");
+
+        assert_eq!(output.dims(), &[3]);
+        assert_eq!(output.data(), &[6.0, 8.0, 10.0]);
+    }
+
+    #[test]
+    fn preserves_operand_order_when_broadcasting_left_scalar_for_subtraction() {
+        let left = Tensor::scalar(10.0).expect("valid scalar");
+        let right = Tensor::vector(vec![1.0, 4.0, 9.0]).expect("valid vector");
+
+        let output = left.sub(&right).expect("left scalar should broadcast");
+
+        assert_eq!(output.dims(), &[3]);
+        assert_eq!(output.data(), &[9.0, 6.0, 1.0]);
+    }
+
+    #[test]
+    fn preserves_operand_order_when_broadcasting_left_scalar_for_division() {
+        let left = Tensor::scalar(24.0).expect("valid scalar");
+        let right = Tensor::vector(vec![2.0, 3.0, 4.0]).expect("valid vector");
+
+        let output = left.div(&right).expect("left scalar should broadcast");
+
+        assert_eq!(output.dims(), &[3]);
+        assert_eq!(output.data(), &[12.0, 8.0, 6.0]);
+    }
+
+    #[test]
+    fn rejects_elementwise_operations_with_incompatible_shapes() {
+        let left = Tensor::vector(vec![1.0, 2.0]).expect("valid left tensor");
+        let right = Tensor::matrix(1, 3, vec![1.0, 2.0, 3.0]).expect("valid right tensor");
+
+        assert_eq!(
+            left.add(&right).expect_err("shapes should not broadcast"),
+            RustGradError::ShapeMismatch {
+                op: "add",
+                left: vec![2],
+                right: vec![1, 3],
+            }
+        );
+    }
+
+    #[test]
+    fn elementwise_operations_do_not_mutate_inputs() {
+        let left = Tensor::vector(vec![1.0, 2.0, 3.0]).expect("valid left tensor");
+        let right = Tensor::scalar(2.0).expect("valid scalar");
+
+        let output = left.mul(&right).expect("right scalar should broadcast");
+
+        assert_eq!(left.data(), &[1.0, 2.0, 3.0]);
+        assert_eq!(right.data(), &[2.0]);
+        assert_eq!(output.data(), &[2.0, 4.0, 6.0]);
+    }
 }
