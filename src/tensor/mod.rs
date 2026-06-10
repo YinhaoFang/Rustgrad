@@ -335,6 +335,85 @@ impl Tensor {
     pub fn flatten(&self) -> Result<Self> {
         self.reshape(vec![self.len()])
     }
+
+    /// Adds two tensors element by element.
+    ///
+    /// Shapes must be equal unless one side is scalar-like, in which case that
+    /// single value is broadcast across the other tensor.
+    pub fn add(&self, rhs: &Self) -> Result<Self> {
+        self.elementwise_binary(rhs, "add", |left, right| left + right)
+    }
+
+    /// Subtracts the right tensor from the left tensor element by element.
+    ///
+    /// Shapes must be equal unless one side is scalar-like, in which case that
+    /// single value is broadcast across the other tensor.
+    pub fn sub(&self, rhs: &Self) -> Result<Self> {
+        self.elementwise_binary(rhs, "sub", |left, right| left - right)
+    }
+
+    /// Multiplies two tensors element by element.
+    ///
+    /// Shapes must be equal unless one side is scalar-like, in which case that
+    /// single value is broadcast across the other tensor.
+    pub fn mul(&self, rhs: &Self) -> Result<Self> {
+        self.elementwise_binary(rhs, "mul", |left, right| left * right)
+    }
+
+    /// Divides the left tensor by the right tensor element by element.
+    ///
+    /// Shapes must be equal unless one side is scalar-like, in which case that
+    /// single value is broadcast across the other tensor.
+    pub fn div(&self, rhs: &Self) -> Result<Self> {
+        self.elementwise_binary(rhs, "div", |left, right| left / right)
+    }
+
+    fn elementwise_binary(
+        &self,
+        rhs: &Self,
+        op: &'static str,
+        apply: impl Fn(f64, f64) -> f64,
+    ) -> Result<Self> {
+        if self.shape == rhs.shape {
+            let data = self
+                .data
+                .iter()
+                .zip(rhs.data.iter())
+                .map(|(&left, &right)| apply(left, right))
+                .collect();
+
+            return Ok(Self {
+                shape: self.shape.clone(),
+                data,
+            });
+        }
+
+        if self.shape.is_scalar_like() {
+            let left = self.data[0];
+            let data = rhs.data.iter().map(|&right| apply(left, right)).collect();
+
+            return Ok(Self {
+                shape: rhs.shape.clone(),
+                data,
+            });
+        }
+
+        if rhs.shape.is_scalar_like() {
+            let right = rhs.data[0];
+            let data = self.data.iter().map(|&left| apply(left, right)).collect();
+
+            return Ok(Self {
+                shape: self.shape.clone(),
+                data,
+            });
+        }
+
+        Err(RustGradError::ShapeMismatch {
+            op,
+            left: self.shape.to_vec(),
+            right: rhs.shape.to_vec(),
+        })
+    }
 }
 
 #[cfg(test)]
