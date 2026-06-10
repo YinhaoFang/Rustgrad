@@ -103,6 +103,32 @@ impl Shape {
     pub fn cols(&self) -> Option<usize> {
         self.is_matrix().then_some(self.dims[1])
     }
+
+    /// Converts a multidimensional index into a row-major flat offset.
+    pub fn offset(&self, index: &[usize]) -> Result<usize> {
+        if index.len() != self.rank() {
+            return Err(RustGradError::IndexOutOfBounds {
+                index: index.to_vec(),
+                shape: self.to_vec(),
+            });
+        }
+
+        let mut offset = 0;
+        let mut stride = 1;
+        for (&idx, &dim) in index.iter().zip(self.dims.iter()).rev() {
+            if idx >= dim {
+                return Err(RustGradError::IndexOutOfBounds {
+                    index: index.to_vec(),
+                    shape: self.to_vec(),
+                });
+            }
+
+            offset += idx * stride;
+            stride *= dim;
+        }
+
+        Ok(offset)
+    }
 }
 
 impl From<Shape> for Vec<usize> {
@@ -247,6 +273,67 @@ impl Tensor {
     #[must_use]
     pub fn cols(&self) -> Option<usize> {
         self.shape.cols()
+    }
+
+    /// Returns a value by flat row-major index.
+    pub fn get_flat(&self, index: usize) -> Result<f64> {
+        self.data
+            .get(index)
+            .copied()
+            .ok_or_else(|| RustGradError::IndexOutOfBounds {
+                index: vec![index],
+                shape: self.shape.to_vec(),
+            })
+    }
+
+    /// Updates a value by flat row-major index.
+    pub fn set_flat(&mut self, index: usize, value: f64) -> Result<()> {
+        let shape = self.shape.to_vec();
+        let slot = self
+            .data
+            .get_mut(index)
+            .ok_or_else(|| RustGradError::IndexOutOfBounds {
+                index: vec![index],
+                shape,
+            })?;
+
+        *slot = value;
+        Ok(())
+    }
+
+    /// Returns a value by multidimensional index.
+    pub fn get(&self, index: &[usize]) -> Result<f64> {
+        self.get_flat(self.shape.offset(index)?)
+    }
+
+    /// Updates a value by multidimensional index.
+    pub fn set(&mut self, index: &[usize], value: f64) -> Result<()> {
+        self.set_flat(self.shape.offset(index)?, value)
+    }
+
+    /// Returns a new tensor with the same data and a different compatible shape.
+    pub fn reshape(&self, dims: impl Into<Vec<usize>>) -> Result<Self> {
+        let shape = Shape::new(dims)?;
+        let expected_len = self.len();
+        let actual_len = shape.element_count();
+
+        if expected_len != actual_len {
+            return Err(RustGradError::ShapeDataMismatch {
+                shape: shape.to_vec(),
+                expected_len,
+                actual_len,
+            });
+        }
+
+        Ok(Self {
+            shape,
+            data: self.data.clone(),
+        })
+    }
+
+    /// Returns a one-dimensional tensor with the same data.
+    pub fn flatten(&self) -> Result<Self> {
+        self.reshape(vec![self.len()])
     }
 }
 
@@ -414,5 +501,113 @@ mod tests {
         let tensor = Tensor::vector(vec![2.0, 4.0, 6.0]).expect("tensor should be valid");
 
         assert_eq!(tensor.into_data(), vec![2.0, 4.0, 6.0]);
+    }
+
+    #[test]
+    fn computes_row_major_offsets() {
+        let shape = Shape::new(vec![2, 3, 4]).expect("shape should be valid");
+
+        assert_eq!(shape.offset(&[0, 0, 0]).expect("offset should exist"), 0);
+        assert_eq!(shape.offset(&[0, 1, 2]).expect("offset should exist"), 6);
+        assert_eq!(shape.offset(&[1, 2, 3]).expect("offset should exist"), 23);
+    }
+
+    #[test]
+    fn rejects_invalid_multidimensional_index() {
+        let shape = Shape::matrix(2, 3).expect("shape should be valid");
+
+        assert_eq!(
+            shape.offset(&[2, 0]).expect_err("row is out of bounds"),
+            RustGradError::IndexOutOfBounds {
+                index: vec![2, 0],
+                shape: vec![2, 3],
+            }
+        );
+        assert_eq!(
+            shape.offset(&[1]).expect_err("rank does not match"),
+            RustGradError::IndexOutOfBounds {
+                index: vec![1],
+                shape: vec![2, 3],
+            }
+        );
+    }
+
+    #[test]
+    fn reads_and_writes_flat_values() {
+        let mut tensor = Tensor::vector(vec![1.0, 2.0, 3.0]).expect("tensor should be valid");
+
+        assert_eq!(tensor.get_flat(1).expect("flat index should exist"), 2.0);
+        tensor
+            .set_flat(1, 9.0)
+            .expect("flat index should be writable");
+
+        assert_eq!(tensor.data(), &[1.0, 9.0, 3.0]);
+    }
+
+    #[test]
+    fn rejects_out_of_bounds_flat_access() {
+        let mut tensor = Tensor::vector(vec![1.0, 2.0]).expect("tensor should be valid");
+
+        assert_eq!(
+            tensor.get_flat(3).expect_err("flat index is out of bounds"),
+            RustGradError::IndexOutOfBounds {
+                index: vec![3],
+                shape: vec![2],
+            }
+        );
+        assert_eq!(
+            tensor
+                .set_flat(3, 4.0)
+                .expect_err("flat index is out of bounds"),
+            RustGradError::IndexOutOfBounds {
+                index: vec![3],
+                shape: vec![2],
+            }
+        );
+    }
+
+    #[test]
+    fn reads_and_writes_multidimensional_values() {
+        let mut tensor =
+            Tensor::matrix(2, 3, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).expect("valid matrix");
+
+        assert_eq!(tensor.get(&[1, 1]).expect("index should exist"), 5.0);
+        tensor.set(&[0, 2], 8.0).expect("index should be writable");
+
+        assert_eq!(tensor.data(), &[1.0, 2.0, 8.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn reshapes_tensor_when_element_count_matches() {
+        let tensor = Tensor::vector(vec![1.0, 2.0, 3.0, 4.0]).expect("valid vector");
+        let reshaped = tensor.reshape(vec![2, 2]).expect("reshape should match");
+
+        assert_eq!(reshaped.dims(), &[2, 2]);
+        assert_eq!(reshaped.data(), &[1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn rejects_reshape_with_different_element_count() {
+        let tensor = Tensor::vector(vec![1.0, 2.0, 3.0, 4.0]).expect("valid vector");
+
+        assert_eq!(
+            tensor
+                .reshape(vec![3, 2])
+                .expect_err("reshape should not match"),
+            RustGradError::ShapeDataMismatch {
+                shape: vec![3, 2],
+                expected_len: 4,
+                actual_len: 6,
+            }
+        );
+    }
+
+    #[test]
+    fn flattens_tensor() {
+        let tensor = Tensor::matrix(2, 2, vec![1.0, 2.0, 3.0, 4.0]).expect("valid matrix");
+        let flattened = tensor.flatten().expect("flatten should keep all values");
+
+        assert_eq!(flattened.dims(), &[4]);
+        assert_eq!(flattened.data(), &[1.0, 2.0, 3.0, 4.0]);
     }
 }
