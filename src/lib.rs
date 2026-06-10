@@ -5,12 +5,15 @@
 
 pub mod autograd;
 pub mod data;
+pub mod error;
 pub mod loss;
 pub mod nn;
 pub mod optim;
 pub mod report;
 pub mod tensor;
 pub mod train;
+
+pub use error::{Result, RustGradError};
 
 /// Returns the crate version from Cargo metadata.
 #[must_use]
