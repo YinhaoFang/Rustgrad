@@ -354,6 +354,41 @@ impl Tensor {
         Self::matrix(cols, rows, data)
     }
 
+    /// Multiplies two two-dimensional tensors as matrices.
+    pub fn matmul(&self, rhs: &Self) -> Result<Self> {
+        let left_rows = self.rows().ok_or_else(|| RustGradError::InvalidArgument {
+            name: "left",
+            reason: format!("matmul expects rank 2, got rank {}", self.rank()),
+        })?;
+        let left_cols = self.cols().expect("matrix tensors always have columns");
+        let right_rows = rhs.rows().ok_or_else(|| RustGradError::InvalidArgument {
+            name: "right",
+            reason: format!("matmul expects rank 2, got rank {}", rhs.rank()),
+        })?;
+        let right_cols = rhs.cols().expect("matrix tensors always have columns");
+
+        if left_cols != right_rows {
+            return Err(RustGradError::MatMulShapeMismatch {
+                left: self.shape.to_vec(),
+                right: rhs.shape.to_vec(),
+            });
+        }
+
+        let mut data = vec![0.0; left_rows * right_cols];
+        for row in 0..left_rows {
+            for col in 0..right_cols {
+                let mut value = 0.0;
+                for inner in 0..left_cols {
+                    value +=
+                        self.data[row * left_cols + inner] * rhs.data[inner * right_cols + col];
+                }
+                data[row * right_cols + col] = value;
+            }
+        }
+
+        Self::matrix(left_rows, right_cols, data)
+    }
+
     /// Returns the sum of all tensor values as a scalar-like tensor.
     pub fn sum(&self) -> Result<Self> {
         Self::scalar(self.data.iter().sum())
