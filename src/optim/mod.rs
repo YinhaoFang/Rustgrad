@@ -496,7 +496,7 @@ fn validate_gradient_shape(parameter: &Tensor, gradient: &Tensor) -> Result<()> 
 
 #[cfg(test)]
 mod tests {
-    use super::{GradientSet, Momentum, Optimizer, SGD};
+    use super::{Adam, GradientSet, Momentum, Optimizer, SGD};
     use crate::tensor::Tensor;
     use crate::RustGradError;
 
@@ -900,6 +900,282 @@ mod tests {
             }
         );
         assert!(optimizer.velocity().is_empty());
+        assert_slice_close(parameter.data(), &[1.0, 2.0]);
+    }
+
+    #[test]
+    fn adam_exposes_default_hyperparameters_and_state() {
+        let optimizer = Adam::new(0.001).expect("valid optimizer");
+
+        assert_eq!(optimizer.name(), "adam");
+        assert_eq!(optimizer.learning_rate(), 0.001);
+        assert_eq!(optimizer.beta1(), 0.9);
+        assert_eq!(optimizer.beta2(), 0.999);
+        assert_eq!(optimizer.epsilon(), 1e-8);
+        assert_eq!(optimizer.timestep(), 0);
+        assert!(optimizer.first_moment().is_empty());
+        assert!(optimizer.second_moment().is_empty());
+    }
+
+    #[test]
+    fn adam_can_update_hyperparameters() {
+        let mut optimizer =
+            Adam::with_hyperparameters(0.01, 0.8, 0.95, 1e-6).expect("valid optimizer");
+
+        optimizer
+            .set_learning_rate(0.02)
+            .expect("learning rate update should succeed");
+        optimizer
+            .set_beta1(0.7)
+            .expect("beta1 update should succeed");
+        optimizer
+            .set_beta2(0.9)
+            .expect("beta2 update should succeed");
+        optimizer
+            .set_epsilon(1e-7)
+            .expect("epsilon update should succeed");
+
+        assert_eq!(optimizer.learning_rate(), 0.02);
+        assert_eq!(optimizer.beta1(), 0.7);
+        assert_eq!(optimizer.beta2(), 0.9);
+        assert_eq!(optimizer.epsilon(), 1e-7);
+    }
+
+    #[test]
+    fn adam_rejects_invalid_beta_on_create() {
+        let error =
+            Adam::with_hyperparameters(0.001, 1.0, 0.999, 1e-8).expect_err("beta1 should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::InvalidArgument {
+                name: "beta1",
+                reason: "beta must be finite and in [0, 1)".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn adam_rejects_invalid_beta_on_update() {
+        let mut optimizer = Adam::new(0.001).expect("valid optimizer");
+
+        let error = optimizer
+            .set_beta2(f64::INFINITY)
+            .expect_err("infinite beta2 should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::InvalidArgument {
+                name: "beta2",
+                reason: "beta must be finite and in [0, 1)".to_string(),
+            }
+        );
+        assert_eq!(optimizer.beta2(), 0.999);
+    }
+
+    #[test]
+    fn adam_rejects_invalid_epsilon_on_create() {
+        let error =
+            Adam::with_hyperparameters(0.001, 0.9, 0.999, 0.0).expect_err("epsilon should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::InvalidArgument {
+                name: "epsilon",
+                reason: "epsilon must be finite and greater than zero".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn adam_rejects_invalid_epsilon_on_update() {
+        let mut optimizer = Adam::new(0.001).expect("valid optimizer");
+
+        let error = optimizer
+            .set_epsilon(f64::NAN)
+            .expect_err("nan epsilon should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::InvalidArgument {
+                name: "epsilon",
+                reason: "epsilon must be finite and greater than zero".to_string(),
+            }
+        );
+        assert_eq!(optimizer.epsilon(), 1e-8);
+    }
+
+    #[test]
+    fn adam_first_step_initializes_moments_and_applies_bias_correction() {
+        let mut parameter = Tensor::scalar(1.0).expect("valid parameter");
+        let gradients =
+            GradientSet::from_tensors(vec![Tensor::scalar(0.5).expect("valid gradient")]);
+        let mut optimizer =
+            Adam::with_hyperparameters(0.1, 0.9, 0.999, 1e-8).expect("valid optimizer");
+        let mut parameters = vec![&mut parameter];
+
+        optimizer
+            .step(&mut parameters, &gradients)
+            .expect("adam step should succeed");
+
+        let expected_update = 0.1 * 0.5 / (0.25_f64.sqrt() + 1e-8);
+        assert_eq!(optimizer.timestep(), 1);
+        assert_slice_close(optimizer.first_moment()[0].data(), &[0.05]);
+        assert_slice_close(optimizer.second_moment()[0].data(), &[0.00025]);
+        assert_slice_close(parameter.data(), &[1.0 - expected_update]);
+    }
+
+    #[test]
+    fn adam_accumulates_moments_across_steps() {
+        let mut parameter = Tensor::scalar(1.0).expect("valid parameter");
+        let gradients =
+            GradientSet::from_tensors(vec![Tensor::scalar(2.0).expect("valid gradient")]);
+        let mut optimizer =
+            Adam::with_hyperparameters(0.1, 0.5, 0.5, 1e-8).expect("valid optimizer");
+
+        {
+            let mut parameters = vec![&mut parameter];
+            optimizer
+                .step(&mut parameters, &gradients)
+                .expect("first step should succeed");
+        }
+        {
+            let mut parameters = vec![&mut parameter];
+            optimizer
+                .step(&mut parameters, &gradients)
+                .expect("second step should succeed");
+        }
+
+        let expected_update = 0.1 * 2.0 / (4.0_f64.sqrt() + 1e-8);
+        assert_eq!(optimizer.timestep(), 2);
+        assert_slice_close(optimizer.first_moment()[0].data(), &[1.5]);
+        assert_slice_close(optimizer.second_moment()[0].data(), &[3.0]);
+        assert_slice_close(parameter.data(), &[1.0 - expected_update * 2.0]);
+    }
+
+    #[test]
+    fn adam_updates_multiple_parameter_tensors() {
+        let mut weights = Tensor::matrix(1, 2, vec![1.0, 2.0]).expect("valid weights");
+        let mut bias = Tensor::vector(vec![0.5, -0.5]).expect("valid bias");
+        let gradients = GradientSet::from_tensors(vec![
+            Tensor::matrix(1, 2, vec![0.2, -0.4]).expect("valid weight gradient"),
+            Tensor::vector(vec![1.0, -1.0]).expect("valid bias gradient"),
+        ]);
+        let mut optimizer =
+            Adam::with_hyperparameters(0.1, 0.9, 0.999, 1e-8).expect("valid optimizer");
+        let mut parameters = vec![&mut weights, &mut bias];
+
+        optimizer
+            .step(&mut parameters, &gradients)
+            .expect("adam step should succeed");
+
+        assert_eq!(optimizer.first_moment().len(), 2);
+        assert_eq!(optimizer.second_moment().len(), 2);
+        assert!(weights.data()[0] < 1.0);
+        assert!(weights.data()[1] > 2.0);
+        assert!(bias.data()[0] < 0.5);
+        assert!(bias.data()[1] > -0.5);
+    }
+
+    #[test]
+    fn adam_reset_state_clears_moments_and_timestep() {
+        let mut parameter = Tensor::scalar(1.0).expect("valid parameter");
+        let gradients =
+            GradientSet::from_tensors(vec![Tensor::scalar(0.5).expect("valid gradient")]);
+        let mut optimizer = Adam::new(0.001).expect("valid optimizer");
+        let mut parameters = vec![&mut parameter];
+
+        optimizer
+            .step(&mut parameters, &gradients)
+            .expect("adam step should succeed");
+        assert_eq!(optimizer.timestep(), 1);
+
+        optimizer.reset_state();
+
+        assert_eq!(optimizer.timestep(), 0);
+        assert!(optimizer.first_moment().is_empty());
+        assert!(optimizer.second_moment().is_empty());
+    }
+
+    #[test]
+    fn adam_rebuilds_moments_when_parameter_shapes_change() {
+        let mut first_parameter = Tensor::vector(vec![1.0, 2.0]).expect("valid parameter");
+        let first_gradients =
+            GradientSet::from_tensors(vec![Tensor::vector(vec![0.5, 0.5]).expect("valid grad")]);
+        let mut optimizer = Adam::new(0.001).expect("valid optimizer");
+
+        {
+            let mut parameters = vec![&mut first_parameter];
+            optimizer
+                .step(&mut parameters, &first_gradients)
+                .expect("first step should succeed");
+        }
+        assert_eq!(optimizer.timestep(), 1);
+        assert_eq!(optimizer.first_moment()[0].dims(), &[2]);
+
+        let mut second_parameter = Tensor::matrix(1, 1, vec![3.0]).expect("valid parameter");
+        let second_gradients =
+            GradientSet::from_tensors(vec![Tensor::matrix(1, 1, vec![2.0]).expect("valid grad")]);
+        {
+            let mut parameters = vec![&mut second_parameter];
+            optimizer
+                .step(&mut parameters, &second_gradients)
+                .expect("shape change should rebuild moments");
+        }
+
+        assert_eq!(optimizer.timestep(), 1);
+        assert_eq!(optimizer.first_moment().len(), 1);
+        assert_eq!(optimizer.second_moment().len(), 1);
+        assert_eq!(optimizer.first_moment()[0].dims(), &[1, 1]);
+        assert_eq!(optimizer.second_moment()[0].dims(), &[1, 1]);
+    }
+
+    #[test]
+    fn adam_rejects_gradient_count_mismatch_without_initializing_moments() {
+        let mut parameter = Tensor::scalar(1.0).expect("valid parameter");
+        let gradients = GradientSet::new();
+        let mut optimizer = Adam::new(0.001).expect("valid optimizer");
+        let mut parameters = vec![&mut parameter];
+
+        let error = optimizer
+            .step(&mut parameters, &gradients)
+            .expect_err("missing gradient should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::InvalidArgument {
+                name: "gradients",
+                reason: "expected 1 gradients, got 0".to_string(),
+            }
+        );
+        assert_eq!(optimizer.timestep(), 0);
+        assert!(optimizer.first_moment().is_empty());
+        assert!(optimizer.second_moment().is_empty());
+    }
+
+    #[test]
+    fn adam_rejects_gradient_shape_mismatch_without_initializing_moments() {
+        let mut parameter = Tensor::vector(vec![1.0, 2.0]).expect("valid parameter");
+        let gradients =
+            GradientSet::from_tensors(vec![Tensor::scalar(1.0).expect("invalid gradient")]);
+        let mut optimizer = Adam::new(0.001).expect("valid optimizer");
+        let mut parameters = vec![&mut parameter];
+
+        let error = optimizer
+            .step(&mut parameters, &gradients)
+            .expect_err("shape mismatch should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::ShapeMismatch {
+                op: "optimizer gradient",
+                left: vec![2],
+                right: vec![1],
+            }
+        );
+        assert_eq!(optimizer.timestep(), 0);
+        assert!(optimizer.first_moment().is_empty());
+        assert!(optimizer.second_moment().is_empty());
         assert_slice_close(parameter.data(), &[1.0, 2.0]);
     }
 }
