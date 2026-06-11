@@ -297,3 +297,336 @@ fn unit_interval(index: usize, samples: usize) -> f64 {
         index as f64 / (samples - 1) as f64
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{linear_regression, one_hot, spiral, xor, Dataset};
+    use crate::tensor::Tensor;
+    use crate::RustGradError;
+
+    const EPSILON: f64 = 1e-12;
+
+    fn assert_slice_close(actual: &[f64], expected: &[f64]) {
+        assert_eq!(actual.len(), expected.len());
+        for (&actual, &expected) in actual.iter().zip(expected.iter()) {
+            assert!(
+                (actual - expected).abs() < EPSILON,
+                "expected {expected}, got {actual}"
+            );
+        }
+    }
+
+    #[test]
+    fn dataset_new_stores_metadata_and_shapes() {
+        let dataset = Dataset::new(
+            "toy",
+            Tensor::matrix(2, 2, vec![1.0, 2.0, 3.0, 4.0]).expect("valid features"),
+            Tensor::matrix(2, 1, vec![0.0, 1.0]).expect("valid targets"),
+        )
+        .expect("valid dataset");
+
+        assert_eq!(dataset.name(), "toy");
+        assert_eq!(dataset.len(), 2);
+        assert!(!dataset.is_empty());
+        assert_eq!(dataset.input_size(), 2);
+        assert_eq!(dataset.target_size(), 1);
+        assert_eq!(dataset.features().dims(), &[2, 2]);
+        assert_eq!(dataset.targets().dims(), &[2, 1]);
+    }
+
+    #[test]
+    fn dataset_new_rejects_empty_name() {
+        let error = Dataset::new(
+            " ",
+            Tensor::matrix(1, 1, vec![1.0]).expect("valid features"),
+            Tensor::matrix(1, 1, vec![1.0]).expect("valid targets"),
+        )
+        .expect_err("empty name should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::InvalidArgument {
+                name: "name",
+                reason: "dataset name must not be empty".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn dataset_new_rejects_non_matrix_features() {
+        let error = Dataset::new(
+            "bad",
+            Tensor::vector(vec![1.0, 2.0]).expect("invalid feature rank"),
+            Tensor::matrix(2, 1, vec![0.0, 1.0]).expect("valid targets"),
+        )
+        .expect_err("rank one features should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::InvalidArgument {
+                name: "features",
+                reason: "dataset features must be rank 2, got rank 1".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn dataset_new_rejects_non_matrix_targets() {
+        let error = Dataset::new(
+            "bad",
+            Tensor::matrix(2, 1, vec![1.0, 2.0]).expect("valid features"),
+            Tensor::vector(vec![0.0, 1.0]).expect("invalid target rank"),
+        )
+        .expect_err("rank one targets should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::InvalidArgument {
+                name: "targets",
+                reason: "dataset targets must be rank 2, got rank 1".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn dataset_new_rejects_row_count_mismatch() {
+        let error = Dataset::new(
+            "bad",
+            Tensor::matrix(2, 1, vec![1.0, 2.0]).expect("valid features"),
+            Tensor::matrix(1, 1, vec![1.0]).expect("valid targets"),
+        )
+        .expect_err("row mismatch should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::ShapeMismatch {
+                op: "dataset rows",
+                left: vec![2, 1],
+                right: vec![1, 1],
+            }
+        );
+    }
+
+    #[test]
+    fn dataset_sample_returns_feature_and_target_vectors() {
+        let dataset = Dataset::new(
+            "toy",
+            Tensor::matrix(2, 2, vec![1.0, 2.0, 3.0, 4.0]).expect("valid features"),
+            Tensor::matrix(2, 2, vec![1.0, 0.0, 0.0, 1.0]).expect("valid targets"),
+        )
+        .expect("valid dataset");
+
+        let (features, targets) = dataset.sample(1).expect("sample should exist");
+
+        assert_eq!(features.dims(), &[2]);
+        assert_eq!(targets.dims(), &[2]);
+        assert_eq!(features.data(), &[3.0, 4.0]);
+        assert_eq!(targets.data(), &[0.0, 1.0]);
+    }
+
+    #[test]
+    fn dataset_sample_rejects_out_of_bounds_index() {
+        let dataset = xor().expect("valid xor dataset");
+
+        let error = dataset
+            .sample(4)
+            .expect_err("index equal to len should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::IndexOutOfBounds {
+                index: vec![4],
+                shape: vec![4],
+            }
+        );
+    }
+
+    #[test]
+    fn dataset_batch_returns_contiguous_rows() {
+        let dataset = Dataset::new(
+            "toy",
+            Tensor::matrix(3, 2, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).expect("valid features"),
+            Tensor::matrix(3, 1, vec![10.0, 20.0, 30.0]).expect("valid targets"),
+        )
+        .expect("valid dataset");
+
+        let batch = dataset.batch(1, 2).expect("batch should exist");
+
+        assert_eq!(batch.name(), "toy[1..3]");
+        assert_eq!(batch.len(), 2);
+        assert_eq!(batch.input_size(), 2);
+        assert_eq!(batch.target_size(), 1);
+        assert_eq!(batch.features().data(), &[3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(batch.targets().data(), &[20.0, 30.0]);
+    }
+
+    #[test]
+    fn dataset_batch_rejects_zero_batch_size() {
+        let dataset = xor().expect("valid xor dataset");
+
+        let error = dataset
+            .batch(0, 0)
+            .expect_err("zero batch size should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::InvalidArgument {
+                name: "batch_size",
+                reason: "value must be greater than zero".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn dataset_batch_rejects_out_of_bounds_range() {
+        let dataset = xor().expect("valid xor dataset");
+
+        let error = dataset
+            .batch(3, 2)
+            .expect_err("range past dataset length should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::IndexOutOfBounds {
+                index: vec![3, 5],
+                shape: vec![4],
+            }
+        );
+    }
+
+    #[test]
+    fn linear_regression_generates_evenly_spaced_samples() {
+        let dataset = linear_regression(3, 2.0, 1.0).expect("valid linear dataset");
+
+        assert_eq!(dataset.name(), "linear-regression");
+        assert_eq!(dataset.features().data(), &[-1.0, 0.0, 1.0]);
+        assert_eq!(dataset.targets().data(), &[-1.0, 1.0, 3.0]);
+    }
+
+    #[test]
+    fn linear_regression_supports_single_sample() {
+        let dataset = linear_regression(1, 3.0, -2.0).expect("valid linear dataset");
+
+        assert_eq!(dataset.features().data(), &[-1.0]);
+        assert_eq!(dataset.targets().data(), &[-5.0]);
+    }
+
+    #[test]
+    fn linear_regression_rejects_zero_samples() {
+        let error = linear_regression(0, 1.0, 0.0).expect_err("zero samples should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::InvalidArgument {
+                name: "samples",
+                reason: "value must be greater than zero".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn linear_regression_rejects_non_finite_parameters() {
+        let error =
+            linear_regression(2, f64::INFINITY, 0.0).expect_err("infinite slope should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::InvalidArgument {
+                name: "slope",
+                reason: "value must be finite".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn xor_dataset_has_expected_truth_table() {
+        let dataset = xor().expect("valid xor dataset");
+
+        assert_eq!(dataset.name(), "xor");
+        assert_eq!(dataset.len(), 4);
+        assert_eq!(dataset.input_size(), 2);
+        assert_eq!(dataset.target_size(), 1);
+        assert_eq!(
+            dataset.features().data(),
+            &[0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0]
+        );
+        assert_eq!(dataset.targets().data(), &[0.0, 1.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn spiral_dataset_has_expected_shapes_and_one_hot_targets() {
+        let dataset = spiral(3, 2).expect("valid spiral dataset");
+
+        assert_eq!(dataset.name(), "spiral");
+        assert_eq!(dataset.len(), 6);
+        assert_eq!(dataset.input_size(), 2);
+        assert_eq!(dataset.target_size(), 2);
+        assert_eq!(dataset.features().dims(), &[6, 2]);
+        assert_eq!(dataset.targets().dims(), &[6, 2]);
+        assert_eq!(
+            dataset.targets().data(),
+            &[1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn spiral_dataset_is_deterministic_for_known_points() {
+        let dataset = spiral(3, 2).expect("valid spiral dataset");
+
+        assert_slice_close(&dataset.features().data()[0..2], &[0.0, 0.0]);
+        assert_slice_close(&dataset.features().data()[2..4], &[0.0, -0.5]);
+        assert_slice_close(&dataset.features().data()[4..6], &[0.0, 1.0]);
+    }
+
+    #[test]
+    fn spiral_rejects_invalid_configuration() {
+        assert_eq!(
+            spiral(0, 2).expect_err("zero samples should fail"),
+            RustGradError::InvalidArgument {
+                name: "samples_per_class",
+                reason: "value must be greater than zero".to_string(),
+            }
+        );
+        assert_eq!(
+            spiral(2, 1).expect_err("one class should fail"),
+            RustGradError::InvalidArgument {
+                name: "classes",
+                reason: "classes must be at least 2".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn one_hot_encodes_class_index() {
+        assert_eq!(
+            one_hot(2, 4).expect("valid class"),
+            vec![0.0, 0.0, 1.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn one_hot_rejects_zero_classes() {
+        let error = one_hot(0, 0).expect_err("zero classes should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::InvalidArgument {
+                name: "classes",
+                reason: "classes must be greater than zero".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn one_hot_rejects_out_of_range_class() {
+        let error = one_hot(3, 3).expect_err("class index should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::InvalidArgument {
+                name: "class_index",
+                reason: "class index 3 is out of range for 3 classes".to_string(),
+            }
+        );
+    }
+}
