@@ -225,6 +225,195 @@ impl Optimizer for Momentum {
     }
 }
 
+/// Adam optimizer with bias-corrected first and second moment estimates.
+///
+/// The update rule follows the common Adam form:
+/// `m = beta1 * m + (1 - beta1) * gradient`,
+/// `v = beta2 * v + (1 - beta2) * gradient^2`, then parameters are updated
+/// with bias-corrected `m_hat` and `v_hat`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Adam {
+    learning_rate: f64,
+    beta1: f64,
+    beta2: f64,
+    epsilon: f64,
+    timestep: usize,
+    first_moment: Vec<Tensor>,
+    second_moment: Vec<Tensor>,
+}
+
+impl Adam {
+    /// Creates an Adam optimizer with common default hyperparameters.
+    pub fn new(learning_rate: f64) -> Result<Self> {
+        Self::with_hyperparameters(learning_rate, 0.9, 0.999, 1e-8)
+    }
+
+    /// Creates an Adam optimizer with explicit hyperparameters.
+    pub fn with_hyperparameters(
+        learning_rate: f64,
+        beta1: f64,
+        beta2: f64,
+        epsilon: f64,
+    ) -> Result<Self> {
+        validate_learning_rate(learning_rate)?;
+        validate_beta("beta1", beta1)?;
+        validate_beta("beta2", beta2)?;
+        validate_epsilon(epsilon)?;
+
+        Ok(Self {
+            learning_rate,
+            beta1,
+            beta2,
+            epsilon,
+            timestep: 0,
+            first_moment: Vec::new(),
+            second_moment: Vec::new(),
+        })
+    }
+
+    /// Returns the first moment decay coefficient.
+    #[must_use]
+    pub fn beta1(&self) -> f64 {
+        self.beta1
+    }
+
+    /// Updates the first moment decay coefficient.
+    pub fn set_beta1(&mut self, beta1: f64) -> Result<()> {
+        validate_beta("beta1", beta1)?;
+        self.beta1 = beta1;
+        Ok(())
+    }
+
+    /// Returns the second moment decay coefficient.
+    #[must_use]
+    pub fn beta2(&self) -> f64 {
+        self.beta2
+    }
+
+    /// Updates the second moment decay coefficient.
+    pub fn set_beta2(&mut self, beta2: f64) -> Result<()> {
+        validate_beta("beta2", beta2)?;
+        self.beta2 = beta2;
+        Ok(())
+    }
+
+    /// Returns the numerical epsilon used in the update denominator.
+    #[must_use]
+    pub fn epsilon(&self) -> f64 {
+        self.epsilon
+    }
+
+    /// Updates the numerical epsilon used in the update denominator.
+    pub fn set_epsilon(&mut self, epsilon: f64) -> Result<()> {
+        validate_epsilon(epsilon)?;
+        self.epsilon = epsilon;
+        Ok(())
+    }
+
+    /// Returns the number of successful Adam steps since the last state reset.
+    #[must_use]
+    pub fn timestep(&self) -> usize {
+        self.timestep
+    }
+
+    /// Returns the stored first moment tensors.
+    #[must_use]
+    pub fn first_moment(&self) -> &[Tensor] {
+        &self.first_moment
+    }
+
+    /// Returns the stored second moment tensors.
+    #[must_use]
+    pub fn second_moment(&self) -> &[Tensor] {
+        &self.second_moment
+    }
+
+    /// Clears optimizer state.
+    pub fn reset_state(&mut self) {
+        self.timestep = 0;
+        self.first_moment.clear();
+        self.second_moment.clear();
+    }
+
+    fn ensure_moments(&mut self, parameters: &[&mut Tensor]) -> Result<()> {
+        let needs_reset = self.first_moment.len() != parameters.len()
+            || self.second_moment.len() != parameters.len()
+            || self
+                .first_moment
+                .iter()
+                .zip(parameters.iter())
+                .any(|(moment, parameter)| moment.dims() != parameter.dims())
+            || self
+                .second_moment
+                .iter()
+                .zip(parameters.iter())
+                .any(|(moment, parameter)| moment.dims() != parameter.dims());
+
+        if needs_reset {
+            self.timestep = 0;
+            self.first_moment = parameters
+                .iter()
+                .map(|parameter| Tensor::zeros(parameter.shape().to_vec()))
+                .collect::<Result<Vec<_>>>()?;
+            self.second_moment = parameters
+                .iter()
+                .map(|parameter| Tensor::zeros(parameter.shape().to_vec()))
+                .collect::<Result<Vec<_>>>()?;
+        }
+
+        Ok(())
+    }
+}
+
+impl Optimizer for Adam {
+    fn step(&mut self, parameters: &mut [&mut Tensor], gradients: &GradientSet) -> Result<()> {
+        validate_parameter_gradient_shapes(parameters, gradients)?;
+        self.ensure_moments(parameters)?;
+        self.timestep += 1;
+
+        let beta1_correction = 1.0 - self.beta1.powf(self.timestep as f64);
+        let beta2_correction = 1.0 - self.beta2.powf(self.timestep as f64);
+
+        for (((parameter, gradient), first_moment), second_moment) in parameters
+            .iter_mut()
+            .zip(gradients.iter())
+            .zip(self.first_moment.iter_mut())
+            .zip(self.second_moment.iter_mut())
+        {
+            for (((value, &grad), first), second) in parameter
+                .data_mut()
+                .iter_mut()
+                .zip(gradient.data())
+                .zip(first_moment.data_mut())
+                .zip(second_moment.data_mut())
+            {
+                *first = self.beta1 * *first + (1.0 - self.beta1) * grad;
+                *second = self.beta2 * *second + (1.0 - self.beta2) * grad * grad;
+
+                let first_hat = *first / beta1_correction;
+                let second_hat = *second / beta2_correction;
+                *value -= self.learning_rate * first_hat / (second_hat.sqrt() + self.epsilon);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn learning_rate(&self) -> f64 {
+        self.learning_rate
+    }
+
+    fn set_learning_rate(&mut self, learning_rate: f64) -> Result<()> {
+        validate_learning_rate(learning_rate)?;
+        self.learning_rate = learning_rate;
+        Ok(())
+    }
+
+    fn name(&self) -> &str {
+        "adam"
+    }
+}
+
 fn validate_learning_rate(learning_rate: f64) -> Result<()> {
     if learning_rate <= 0.0 || !learning_rate.is_finite() {
         return Err(RustGradError::InvalidArgument {
@@ -241,6 +430,28 @@ fn validate_momentum(momentum: f64) -> Result<()> {
         return Err(RustGradError::InvalidArgument {
             name: "momentum",
             reason: "momentum must be finite and in [0, 1)".to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_beta(name: &'static str, beta: f64) -> Result<()> {
+    if !(0.0..1.0).contains(&beta) || !beta.is_finite() {
+        return Err(RustGradError::InvalidArgument {
+            name,
+            reason: "beta must be finite and in [0, 1)".to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_epsilon(epsilon: f64) -> Result<()> {
+    if epsilon <= 0.0 || !epsilon.is_finite() {
+        return Err(RustGradError::InvalidArgument {
+            name: "epsilon",
+            reason: "epsilon must be finite and greater than zero".to_string(),
         });
     }
 
