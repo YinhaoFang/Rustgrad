@@ -178,3 +178,223 @@ fn validate_target_distribution(targets: &[f64]) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{CrossEntropyLoss, Loss, MSELoss};
+    use crate::tensor::Tensor;
+    use crate::RustGradError;
+
+    const EPSILON: f64 = 1e-10;
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < EPSILON,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    fn scalar_value(tensor: &Tensor) -> f64 {
+        assert_eq!(tensor.dims(), &[1]);
+        tensor.data()[0]
+    }
+
+    #[test]
+    fn mse_loss_name_is_stable() {
+        assert_eq!(MSELoss::new().name(), "mse");
+    }
+
+    #[test]
+    fn mse_loss_returns_mean_squared_error_for_vectors() {
+        let predictions = Tensor::vector(vec![1.0, 2.0, 4.0]).expect("valid predictions");
+        let targets = Tensor::vector(vec![1.0, 1.0, 1.0]).expect("valid targets");
+
+        let loss = MSELoss::new()
+            .forward(&predictions, &targets)
+            .expect("loss should compute");
+
+        assert_close(scalar_value(&loss), 10.0 / 3.0);
+    }
+
+    #[test]
+    fn mse_loss_returns_mean_squared_error_for_matrices() {
+        let predictions =
+            Tensor::matrix(2, 2, vec![1.0, 2.0, 3.0, 4.0]).expect("valid predictions");
+        let targets = Tensor::matrix(2, 2, vec![1.0, 1.0, 5.0, 4.0]).expect("valid targets");
+
+        let loss = MSELoss::new()
+            .forward(&predictions, &targets)
+            .expect("loss should compute");
+
+        assert_close(scalar_value(&loss), 1.25);
+    }
+
+    #[test]
+    fn mse_loss_rejects_shape_mismatch() {
+        let predictions = Tensor::vector(vec![1.0, 2.0]).expect("valid predictions");
+        let targets = Tensor::matrix(1, 2, vec![1.0, 2.0]).expect("valid targets");
+
+        let error = MSELoss::new()
+            .forward(&predictions, &targets)
+            .expect_err("shape mismatch should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::ShapeMismatch {
+                op: "mse",
+                left: vec![2],
+                right: vec![1, 2],
+            }
+        );
+    }
+
+    #[test]
+    fn cross_entropy_loss_name_and_default_epsilon_are_stable() {
+        let loss = CrossEntropyLoss::new();
+
+        assert_eq!(loss.name(), "cross_entropy");
+        assert_close(loss.epsilon(), 1e-12);
+        assert_eq!(CrossEntropyLoss::default(), loss);
+    }
+
+    #[test]
+    fn cross_entropy_rejects_invalid_epsilon() {
+        let error = CrossEntropyLoss::with_epsilon(0.0).expect_err("zero epsilon should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::InvalidArgument {
+                name: "epsilon",
+                reason: "epsilon must be finite and greater than zero".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn cross_entropy_vector_accepts_one_hot_targets() {
+        let predictions = Tensor::vector(vec![1.0, 2.0, 3.0]).expect("valid predictions");
+        let targets = Tensor::vector(vec![0.0, 0.0, 1.0]).expect("valid targets");
+
+        let loss = CrossEntropyLoss::new()
+            .forward(&predictions, &targets)
+            .expect("loss should compute");
+
+        let expected = (1.0_f64.exp() + 2.0_f64.exp() + 3.0_f64.exp()).ln() - 3.0;
+        assert_close(scalar_value(&loss), expected);
+    }
+
+    #[test]
+    fn cross_entropy_vector_accepts_soft_targets() {
+        let predictions = Tensor::vector(vec![0.0, 0.0]).expect("valid predictions");
+        let targets = Tensor::vector(vec![0.25, 0.75]).expect("valid targets");
+
+        let loss = CrossEntropyLoss::new()
+            .forward(&predictions, &targets)
+            .expect("loss should compute");
+
+        assert_close(scalar_value(&loss), 2.0_f64.ln());
+    }
+
+    #[test]
+    fn cross_entropy_matrix_averages_rows() {
+        let predictions =
+            Tensor::matrix(2, 2, vec![0.0, 0.0, 0.0, 2.0]).expect("valid predictions");
+        let targets = Tensor::matrix(2, 2, vec![1.0, 0.0, 0.0, 1.0]).expect("valid targets");
+
+        let loss = CrossEntropyLoss::new()
+            .forward(&predictions, &targets)
+            .expect("loss should compute");
+
+        let first_row = 2.0_f64.ln();
+        let second_row = (1.0 + (-2.0_f64).exp()).ln();
+        assert_close(scalar_value(&loss), (first_row + second_row) / 2.0);
+    }
+
+    #[test]
+    fn cross_entropy_is_stable_for_large_logits() {
+        let predictions = Tensor::vector(vec![1000.0, 1001.0]).expect("valid predictions");
+        let targets = Tensor::vector(vec![0.0, 1.0]).expect("valid targets");
+
+        let loss = CrossEntropyLoss::new()
+            .forward(&predictions, &targets)
+            .expect("loss should compute");
+
+        let actual = scalar_value(&loss);
+        assert!(actual.is_finite());
+        assert_close(actual, (1.0 + (-1.0_f64).exp()).ln());
+    }
+
+    #[test]
+    fn cross_entropy_rejects_shape_mismatch() {
+        let predictions = Tensor::vector(vec![1.0, 2.0, 3.0]).expect("valid predictions");
+        let targets = Tensor::vector(vec![0.0, 1.0]).expect("valid targets");
+
+        let error = CrossEntropyLoss::new()
+            .forward(&predictions, &targets)
+            .expect_err("shape mismatch should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::ShapeMismatch {
+                op: "cross entropy",
+                left: vec![3],
+                right: vec![2],
+            }
+        );
+    }
+
+    #[test]
+    fn cross_entropy_rejects_rank_three_predictions() {
+        let predictions =
+            Tensor::from_vec(vec![1, 1, 2], vec![0.0, 1.0]).expect("valid predictions");
+        let targets = Tensor::from_vec(vec![1, 1, 2], vec![0.0, 1.0]).expect("valid targets");
+
+        let error = CrossEntropyLoss::new()
+            .forward(&predictions, &targets)
+            .expect_err("rank three should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::InvalidArgument {
+                name: "rank",
+                reason: "cross entropy supports rank 1 or 2, got rank 3".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn cross_entropy_rejects_negative_targets() {
+        let predictions = Tensor::vector(vec![0.0, 1.0]).expect("valid predictions");
+        let targets = Tensor::vector(vec![-0.1, 1.1]).expect("valid targets");
+
+        let error = CrossEntropyLoss::new()
+            .forward(&predictions, &targets)
+            .expect_err("negative target should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::InvalidArgument {
+                name: "targets",
+                reason: "targets must be finite and non-negative".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn cross_entropy_rejects_targets_that_do_not_sum_to_one() {
+        let predictions = Tensor::vector(vec![0.0, 1.0]).expect("valid predictions");
+        let targets = Tensor::vector(vec![0.2, 0.2]).expect("valid targets");
+
+        let error = CrossEntropyLoss::new()
+            .forward(&predictions, &targets)
+            .expect_err("invalid target sum should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::InvalidArgument {
+                name: "targets",
+                reason: "targets must sum to 1.0, got 0.4".to_string(),
+            }
+        );
+    }
+}
