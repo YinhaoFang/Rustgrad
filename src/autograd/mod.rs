@@ -390,6 +390,9 @@ impl ComputationGraph {
             Operation::Sub => self.sub_gradients(node.parents(), upstream_grad),
             Operation::Mul => self.mul_gradients(node.parents(), upstream_grad),
             Operation::Div => self.div_gradients(node.parents(), upstream_grad),
+            Operation::MatMul => self.matmul_gradients(node.parents(), upstream_grad),
+            Operation::Sum => self.sum_gradient(node.parents(), upstream_grad),
+            Operation::Mean => self.mean_gradient(node.parents(), upstream_grad),
             operation => Err(RustGradError::UnsupportedOperation {
                 op: operation.name().to_string(),
                 reason: format!(
@@ -489,6 +492,42 @@ impl ComputationGraph {
         ])
     }
 
+    fn matmul_gradients(
+        &self,
+        parents: &[NodeId],
+        upstream_grad: &Tensor,
+    ) -> Result<Vec<(NodeId, Tensor)>> {
+        let (left_id, left_value, right_id, right_value) =
+            self.binary_parent_values(parents, "matmul")?;
+        let left_grad = upstream_grad.matmul(&right_value.transpose()?)?;
+        let right_grad = left_value.transpose()?.matmul(upstream_grad)?;
+
+        Ok(vec![(left_id, left_grad), (right_id, right_grad)])
+    }
+
+    fn sum_gradient(
+        &self,
+        parents: &[NodeId],
+        upstream_grad: &Tensor,
+    ) -> Result<Vec<(NodeId, Tensor)>> {
+        let (parent_id, parent_value) = self.unary_parent_value(parents, "sum")?;
+        let grad = Self::broadcast_reduction_gradient(&parent_value, upstream_grad, 1.0)?;
+
+        Ok(vec![(parent_id, grad)])
+    }
+
+    fn mean_gradient(
+        &self,
+        parents: &[NodeId],
+        upstream_grad: &Tensor,
+    ) -> Result<Vec<(NodeId, Tensor)>> {
+        let (parent_id, parent_value) = self.unary_parent_value(parents, "mean")?;
+        let scale = 1.0 / parent_value.len() as f64;
+        let grad = Self::broadcast_reduction_gradient(&parent_value, upstream_grad, scale)?;
+
+        Ok(vec![(parent_id, grad)])
+    }
+
     fn binary_parent_values(
         &self,
         parents: &[NodeId],
@@ -520,6 +559,25 @@ impl ComputationGraph {
         Ok((*left_id, left_value, *right_id, right_value))
     }
 
+    fn unary_parent_value(&self, parents: &[NodeId], op: &'static str) -> Result<(NodeId, Tensor)> {
+        let [parent_id] = parents else {
+            return Err(RustGradError::InvalidArgument {
+                name: "parents",
+                reason: format!("{op} expects exactly 1 parent, got {}", parents.len()),
+            });
+        };
+        let parent_value = self
+            .node(*parent_id)
+            .ok_or_else(|| RustGradError::InvalidArgument {
+                name: "parents",
+                reason: format!("node {} does not exist", parent_id.index()),
+            })?
+            .value()
+            .clone();
+
+        Ok((*parent_id, parent_value))
+    }
+
     fn fit_gradient_to_parent(parent_value: &Tensor, grad: Tensor) -> Result<Tensor> {
         if parent_value.dims() == grad.dims() {
             return Ok(grad);
@@ -533,6 +591,27 @@ impl ComputationGraph {
             op: "gradient",
             left: parent_value.shape().to_vec(),
             right: grad.shape().to_vec(),
+        })
+    }
+
+    fn broadcast_reduction_gradient(
+        parent_value: &Tensor,
+        upstream_grad: &Tensor,
+        scale: f64,
+    ) -> Result<Tensor> {
+        if upstream_grad.shape().is_scalar_like() {
+            let value = upstream_grad.get_flat(0)? * scale;
+            return Tensor::full(parent_value.shape().to_vec(), value);
+        }
+
+        if upstream_grad.dims() == parent_value.dims() {
+            return upstream_grad.mul(&Tensor::scalar(scale)?);
+        }
+
+        Err(RustGradError::ShapeMismatch {
+            op: "reduction gradient",
+            left: parent_value.shape().to_vec(),
+            right: upstream_grad.shape().to_vec(),
         })
     }
 }
@@ -731,26 +810,29 @@ mod tests {
     }
 
     #[test]
-    fn backward_reports_unsupported_operation_before_gradient_rules_exist() {
+    fn backward_reports_unsupported_operation_for_missing_gradient_rule() {
         let mut graph = ComputationGraph::new();
-        let left = graph.add_leaf(Tensor::scalar(1.0).expect("valid scalar"), true);
-        let right = graph.add_leaf(Tensor::scalar(2.0).expect("valid scalar"), true);
+        let input = graph.add_leaf(
+            Tensor::matrix(2, 1, vec![1.0, 2.0]).expect("valid matrix"),
+            true,
+        );
         let output = graph
             .add_operation(
-                Operation::MatMul,
-                vec![left, right],
-                Tensor::scalar(3.0).expect("valid scalar"),
+                Operation::Transpose,
+                vec![input],
+                Tensor::matrix(1, 2, vec![1.0, 2.0]).expect("valid matrix"),
                 true,
             )
-            .expect("parents should exist");
+            .expect("parent should exist");
 
         assert_eq!(
             graph
                 .backward(output)
-                .expect_err("matmul gradient rule is not implemented yet"),
+                .expect_err("transpose gradient rule is not implemented yet"),
             RustGradError::UnsupportedOperation {
-                op: "matmul".to_string(),
-                reason: "gradient rule is not implemented yet for upstream shape [1]".to_string(),
+                op: "transpose".to_string(),
+                reason: "gradient rule is not implemented yet for upstream shape [1, 2]"
+                    .to_string(),
             }
         );
     }
