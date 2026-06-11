@@ -194,6 +194,112 @@ impl Module for Linear {
     }
 }
 
+/// Module wrapper around a stateless activation function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActivationLayer {
+    activation: Activation,
+}
+
+impl ActivationLayer {
+    /// Creates a new activation layer.
+    #[must_use]
+    pub fn new(activation: Activation) -> Self {
+        Self { activation }
+    }
+
+    /// Returns the wrapped activation.
+    #[must_use]
+    pub fn activation(&self) -> Activation {
+        self.activation
+    }
+}
+
+impl Module for ActivationLayer {
+    fn forward(&self, input: &Tensor) -> Result<Tensor> {
+        self.activation.apply(input)
+    }
+
+    fn name(&self) -> &str {
+        self.activation.name()
+    }
+}
+
+/// A simple sequential model that applies modules in insertion order.
+#[derive(Default)]
+pub struct Sequential {
+    layers: Vec<Box<dyn Module>>,
+}
+
+impl Sequential {
+    /// Creates an empty sequential container.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Creates a sequential container from existing boxed layers.
+    #[must_use]
+    pub fn from_layers(layers: Vec<Box<dyn Module>>) -> Self {
+        Self { layers }
+    }
+
+    /// Adds a layer to the end of the sequence.
+    pub fn push<M>(&mut self, layer: M)
+    where
+        M: Module + 'static,
+    {
+        self.layers.push(Box::new(layer));
+    }
+
+    /// Returns the number of layers.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.layers.len()
+    }
+
+    /// Returns true when the sequence has no layers.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.layers.is_empty()
+    }
+
+    /// Returns layer names in forward order.
+    #[must_use]
+    pub fn layer_names(&self) -> Vec<&str> {
+        self.layers.iter().map(|layer| layer.name()).collect()
+    }
+}
+
+impl Module for Sequential {
+    fn forward(&self, input: &Tensor) -> Result<Tensor> {
+        let mut output = input.clone();
+        for layer in &self.layers {
+            output = layer.forward(&output)?;
+        }
+        Ok(output)
+    }
+
+    fn parameters(&self) -> Vec<&Tensor> {
+        let mut parameters = Vec::new();
+        for layer in &self.layers {
+            parameters.extend(layer.parameters());
+        }
+        parameters
+    }
+
+    fn parameters_mut(&mut self) -> Vec<&mut Tensor> {
+        let mut parameters = Vec::new();
+        for layer in &mut self.layers {
+            parameters.extend(layer.parameters_mut());
+        }
+        parameters
+    }
+
+    fn name(&self) -> &str {
+        "sequential"
+    }
+}
+
 /// Common activation functions used by neural networks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Activation {
