@@ -1,5 +1,7 @@
 //! Automatic differentiation and computation graph utilities.
 
+use std::collections::HashSet;
+
 use crate::tensor::Tensor;
 use crate::{Result, RustGradError};
 
@@ -162,6 +164,15 @@ impl GraphNode {
         self.grad = Some(grad);
     }
 
+    /// Adds a gradient contribution to this node.
+    pub fn accumulate_grad(&mut self, grad: Tensor) -> Result<()> {
+        self.grad = Some(match self.grad.take() {
+            Some(existing) => existing.add(&grad)?,
+            None => grad,
+        });
+        Ok(())
+    }
+
     /// Removes and returns the currently accumulated gradient.
     pub fn take_grad(&mut self) -> Option<Tensor> {
         self.grad.take()
@@ -250,8 +261,59 @@ impl ComputationGraph {
         }
     }
 
+    /// Returns node identifiers in dependency-first topological order.
+    pub fn topological_order(&self, output: NodeId) -> Result<Vec<NodeId>> {
+        self.ensure_node_exists(output)?;
+
+        let mut visited = HashSet::new();
+        let mut order = Vec::new();
+        self.visit_dependencies(output, &mut visited, &mut order)?;
+        Ok(order)
+    }
+
+    /// Runs a backward pass from the output node.
+    ///
+    /// This method prepares the graph for automatic differentiation by clearing
+    /// old gradients, seeding the output with an all-ones gradient, and walking
+    /// nodes in reverse topological order. Operation-specific gradient rules are
+    /// implemented incrementally; unsupported non-leaf operations return a
+    /// clear error instead of silently producing incorrect gradients.
+    pub fn backward(&mut self, output: NodeId) -> Result<()> {
+        let order = self.topological_order(output)?;
+        self.clear_gradients();
+        self.seed_output_gradient(output)?;
+
+        for node_id in order.into_iter().rev() {
+            let Some(grad) = self.node(node_id).and_then(|node| node.grad()).cloned() else {
+                continue;
+            };
+            if !self.node(node_id).is_some_and(GraphNode::requires_grad) {
+                continue;
+            }
+
+            for (parent, parent_grad) in self.local_gradients(node_id, &grad)? {
+                if self.node(parent).is_some_and(GraphNode::requires_grad) {
+                    self.accumulate_node_grad(parent, parent_grad)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn next_id(&self) -> NodeId {
         NodeId::new(self.nodes.len())
+    }
+
+    fn ensure_node_exists(&self, id: NodeId) -> Result<()> {
+        if self.node(id).is_some() {
+            Ok(())
+        } else {
+            Err(RustGradError::InvalidArgument {
+                name: "node",
+                reason: format!("node {} does not exist", id.index()),
+            })
+        }
     }
 
     fn validate_parents(&self, parents: &[NodeId]) -> Result<()> {
@@ -265,6 +327,73 @@ impl ComputationGraph {
         }
 
         Ok(())
+    }
+
+    fn visit_dependencies(
+        &self,
+        id: NodeId,
+        visited: &mut HashSet<NodeId>,
+        order: &mut Vec<NodeId>,
+    ) -> Result<()> {
+        if !visited.insert(id) {
+            return Ok(());
+        }
+
+        let node = self
+            .node(id)
+            .ok_or_else(|| RustGradError::InvalidArgument {
+                name: "node",
+                reason: format!("node {} does not exist", id.index()),
+            })?;
+
+        for parent in node.parents() {
+            self.visit_dependencies(*parent, visited, order)?;
+        }
+        order.push(id);
+        Ok(())
+    }
+
+    fn seed_output_gradient(&mut self, output: NodeId) -> Result<()> {
+        let shape = self
+            .node(output)
+            .ok_or_else(|| RustGradError::InvalidArgument {
+                name: "node",
+                reason: format!("node {} does not exist", output.index()),
+            })?
+            .value()
+            .shape()
+            .to_vec();
+        let grad = Tensor::ones(shape)?;
+        self.accumulate_node_grad(output, grad)
+    }
+
+    fn accumulate_node_grad(&mut self, id: NodeId, grad: Tensor) -> Result<()> {
+        self.node_mut(id)
+            .ok_or_else(|| RustGradError::InvalidArgument {
+                name: "node",
+                reason: format!("node {} does not exist", id.index()),
+            })?
+            .accumulate_grad(grad)
+    }
+
+    fn local_gradients(&self, id: NodeId, upstream_grad: &Tensor) -> Result<Vec<(NodeId, Tensor)>> {
+        let node = self
+            .node(id)
+            .ok_or_else(|| RustGradError::InvalidArgument {
+                name: "node",
+                reason: format!("node {} does not exist", id.index()),
+            })?;
+
+        match node.operation_kind() {
+            Operation::Leaf => Ok(Vec::new()),
+            operation => Err(RustGradError::UnsupportedOperation {
+                op: operation.name().to_string(),
+                reason: format!(
+                    "gradient rule is not implemented yet for upstream shape {:?}",
+                    upstream_grad.dims()
+                ),
+            }),
+        }
     }
 }
 
@@ -352,5 +481,137 @@ mod tests {
     fn operation_name_supports_builtin_and_custom_ops() {
         assert_eq!(Operation::MatMul.name(), "matmul");
         assert_eq!(Operation::Custom("dropout".to_string()).name(), "dropout");
+    }
+
+    #[test]
+    fn returns_dependency_first_topological_order() {
+        let mut graph = ComputationGraph::new();
+        let left = graph.add_leaf(Tensor::scalar(1.0).expect("valid scalar"), true);
+        let right = graph.add_leaf(Tensor::scalar(2.0).expect("valid scalar"), true);
+        let hidden = graph
+            .add_operation(
+                Operation::Custom("identity".to_string()),
+                vec![left],
+                Tensor::scalar(1.0).expect("valid scalar"),
+                true,
+            )
+            .expect("parent should exist");
+        let output = graph
+            .add_operation(
+                Operation::Custom("join".to_string()),
+                vec![hidden, right],
+                Tensor::scalar(3.0).expect("valid scalar"),
+                true,
+            )
+            .expect("parents should exist");
+
+        let order = graph
+            .topological_order(output)
+            .expect("topological order should exist");
+
+        assert_eq!(order, vec![left, hidden, right, output]);
+    }
+
+    #[test]
+    fn topological_order_visits_shared_parent_once() {
+        let mut graph = ComputationGraph::new();
+        let shared = graph.add_leaf(Tensor::scalar(2.0).expect("valid scalar"), true);
+        let output = graph
+            .add_operation(
+                Operation::Custom("double-use".to_string()),
+                vec![shared, shared],
+                Tensor::scalar(4.0).expect("valid scalar"),
+                true,
+            )
+            .expect("parents should exist");
+
+        let order = graph
+            .topological_order(output)
+            .expect("topological order should exist");
+
+        assert_eq!(order, vec![shared, output]);
+    }
+
+    #[test]
+    fn rejects_topological_order_for_missing_output() {
+        let graph = ComputationGraph::new();
+
+        assert_eq!(
+            graph
+                .topological_order(NodeId::new(1))
+                .expect_err("output should be missing"),
+            RustGradError::InvalidArgument {
+                name: "node",
+                reason: "node 1 does not exist".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn backward_seeds_leaf_output_gradient_with_ones() {
+        let mut graph = ComputationGraph::new();
+        let output = graph.add_leaf(
+            Tensor::matrix(1, 3, vec![2.0, 4.0, 6.0]).expect("valid matrix"),
+            true,
+        );
+
+        graph
+            .backward(output)
+            .expect("leaf backward should succeed");
+
+        assert_eq!(
+            graph
+                .node(output)
+                .and_then(|node| node.grad())
+                .map(Tensor::data),
+            Some(&[1.0, 1.0, 1.0][..])
+        );
+    }
+
+    #[test]
+    fn backward_clears_existing_gradients_before_seeding_output() {
+        let mut graph = ComputationGraph::new();
+        let output = graph.add_leaf(Tensor::scalar(3.0).expect("valid scalar"), true);
+        graph
+            .node_mut(output)
+            .expect("node should exist")
+            .set_grad(Tensor::scalar(99.0).expect("valid scalar"));
+
+        graph
+            .backward(output)
+            .expect("leaf backward should succeed");
+
+        assert_eq!(
+            graph
+                .node(output)
+                .and_then(|node| node.grad())
+                .map(Tensor::data),
+            Some(&[1.0][..])
+        );
+    }
+
+    #[test]
+    fn backward_reports_unsupported_operation_before_gradient_rules_exist() {
+        let mut graph = ComputationGraph::new();
+        let left = graph.add_leaf(Tensor::scalar(1.0).expect("valid scalar"), true);
+        let right = graph.add_leaf(Tensor::scalar(2.0).expect("valid scalar"), true);
+        let output = graph
+            .add_operation(
+                Operation::Add,
+                vec![left, right],
+                Tensor::scalar(3.0).expect("valid scalar"),
+                true,
+            )
+            .expect("parents should exist");
+
+        assert_eq!(
+            graph
+                .backward(output)
+                .expect_err("add gradient rule is not implemented yet"),
+            RustGradError::UnsupportedOperation {
+                op: "add".to_string(),
+                reason: "gradient rule is not implemented yet for upstream shape [1]".to_string(),
+            }
+        );
     }
 }

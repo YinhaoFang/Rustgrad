@@ -59,6 +59,13 @@ pub enum RustGradError {
         /// Human-readable validation detail.
         reason: String,
     },
+    /// An operation exists in the graph but does not yet have a gradient rule.
+    UnsupportedOperation {
+        /// Operation name.
+        op: String,
+        /// Human-readable explanation.
+        reason: String,
+    },
 }
 
 impl Display for RustGradError {
@@ -89,6 +96,9 @@ impl Display for RustGradError {
             }
             Self::InvalidArgument { name, reason } => {
                 write!(f, "invalid argument `{name}`: {reason}")
+            }
+            Self::UnsupportedOperation { op, reason } => {
+                write!(f, "unsupported operation `{op}`: {reason}")
             }
         }
     }
