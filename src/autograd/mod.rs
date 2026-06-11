@@ -1230,4 +1230,186 @@ mod tests {
             Some(&[3.0][..])
         );
     }
+
+    #[test]
+    fn backward_computes_matmul_gradients() {
+        let mut graph = ComputationGraph::new();
+        let left = graph.add_leaf(
+            Tensor::matrix(2, 2, vec![1.0, 2.0, 3.0, 4.0]).expect("valid left matrix"),
+            true,
+        );
+        let right = graph.add_leaf(
+            Tensor::matrix(2, 2, vec![5.0, 6.0, 7.0, 8.0]).expect("valid right matrix"),
+            true,
+        );
+        let output = graph
+            .add_operation(
+                Operation::MatMul,
+                vec![left, right],
+                Tensor::matrix(2, 2, vec![19.0, 22.0, 43.0, 50.0]).expect("valid output"),
+                true,
+            )
+            .expect("parents should exist");
+
+        graph
+            .backward(output)
+            .expect("matmul backward should succeed");
+
+        assert_eq!(
+            graph
+                .node(left)
+                .and_then(|node| node.grad())
+                .map(Tensor::data),
+            Some(&[11.0, 15.0, 11.0, 15.0][..])
+        );
+        assert_eq!(
+            graph
+                .node(right)
+                .and_then(|node| node.grad())
+                .map(Tensor::data),
+            Some(&[4.0, 4.0, 6.0, 6.0][..])
+        );
+    }
+
+    #[test]
+    fn backward_computes_sum_gradient() {
+        let mut graph = ComputationGraph::new();
+        let input = graph.add_leaf(
+            Tensor::matrix(2, 2, vec![1.0, 2.0, 3.0, 4.0]).expect("valid matrix"),
+            true,
+        );
+        let output = graph
+            .add_operation(
+                Operation::Sum,
+                vec![input],
+                Tensor::scalar(10.0).expect("valid scalar"),
+                true,
+            )
+            .expect("parent should exist");
+
+        graph.backward(output).expect("sum backward should succeed");
+
+        assert_eq!(
+            graph
+                .node(input)
+                .and_then(|node| node.grad())
+                .map(Tensor::data),
+            Some(&[1.0, 1.0, 1.0, 1.0][..])
+        );
+    }
+
+    #[test]
+    fn backward_computes_mean_gradient() {
+        let mut graph = ComputationGraph::new();
+        let input = graph.add_leaf(
+            Tensor::matrix(2, 2, vec![2.0, 4.0, 6.0, 8.0]).expect("valid matrix"),
+            true,
+        );
+        let output = graph
+            .add_operation(
+                Operation::Mean,
+                vec![input],
+                Tensor::scalar(5.0).expect("valid scalar"),
+                true,
+            )
+            .expect("parent should exist");
+
+        graph
+            .backward(output)
+            .expect("mean backward should succeed");
+
+        assert_eq!(
+            graph
+                .node(input)
+                .and_then(|node| node.grad())
+                .map(Tensor::data),
+            Some(&[0.25, 0.25, 0.25, 0.25][..])
+        );
+    }
+
+    #[test]
+    fn backward_chains_matmul_into_sum() {
+        let mut graph = ComputationGraph::new();
+        let left = graph.add_leaf(
+            Tensor::matrix(1, 2, vec![2.0, 3.0]).expect("valid left matrix"),
+            true,
+        );
+        let right = graph.add_leaf(
+            Tensor::matrix(2, 1, vec![5.0, 7.0]).expect("valid right matrix"),
+            true,
+        );
+        let product = graph
+            .add_operation(
+                Operation::MatMul,
+                vec![left, right],
+                Tensor::matrix(1, 1, vec![31.0]).expect("valid product"),
+                true,
+            )
+            .expect("parents should exist");
+        let output = graph
+            .add_operation(
+                Operation::Sum,
+                vec![product],
+                Tensor::scalar(31.0).expect("valid scalar"),
+                true,
+            )
+            .expect("parent should exist");
+
+        graph
+            .backward(output)
+            .expect("chain backward should succeed");
+
+        assert_eq!(
+            graph
+                .node(left)
+                .and_then(|node| node.grad())
+                .map(Tensor::data),
+            Some(&[5.0, 7.0][..])
+        );
+        assert_eq!(
+            graph
+                .node(right)
+                .and_then(|node| node.grad())
+                .map(Tensor::data),
+            Some(&[2.0, 3.0][..])
+        );
+    }
+
+    #[test]
+    fn backward_skips_matmul_parent_that_does_not_require_grad() {
+        let mut graph = ComputationGraph::new();
+        let trainable = graph.add_leaf(
+            Tensor::matrix(1, 2, vec![2.0, 3.0]).expect("valid matrix"),
+            true,
+        );
+        let constant = graph.add_leaf(
+            Tensor::matrix(2, 1, vec![5.0, 7.0]).expect("valid matrix"),
+            false,
+        );
+        let output = graph
+            .add_operation(
+                Operation::MatMul,
+                vec![trainable, constant],
+                Tensor::matrix(1, 1, vec![31.0]).expect("valid output"),
+                true,
+            )
+            .expect("parents should exist");
+
+        graph
+            .backward(output)
+            .expect("matmul backward should succeed");
+
+        assert_eq!(
+            graph
+                .node(trainable)
+                .and_then(|node| node.grad())
+                .map(Tensor::data),
+            Some(&[5.0, 7.0][..])
+        );
+        assert!(graph
+            .node(constant)
+            .expect("constant should exist")
+            .grad()
+            .is_none());
+    }
 }
