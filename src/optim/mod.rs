@@ -285,7 +285,7 @@ fn validate_gradient_shape(parameter: &Tensor, gradient: &Tensor) -> Result<()> 
 
 #[cfg(test)]
 mod tests {
-    use super::{GradientSet, Optimizer, SGD};
+    use super::{GradientSet, Momentum, Optimizer, SGD};
     use crate::tensor::Tensor;
     use crate::RustGradError;
 
@@ -477,5 +477,218 @@ mod tests {
         let _ = optimizer.step(&mut parameters, &gradients);
 
         assert_eq!(parameter.data(), &[1.0, 2.0]);
+    }
+
+    #[test]
+    fn momentum_exposes_name_learning_rate_and_momentum() {
+        let optimizer = Momentum::new(0.05, 0.9).expect("valid optimizer");
+
+        assert_eq!(optimizer.name(), "momentum");
+        assert_eq!(optimizer.learning_rate(), 0.05);
+        assert_eq!(optimizer.momentum(), 0.9);
+        assert!(optimizer.velocity().is_empty());
+    }
+
+    #[test]
+    fn momentum_can_update_hyperparameters() {
+        let mut optimizer = Momentum::new(0.1, 0.5).expect("valid optimizer");
+
+        optimizer
+            .set_learning_rate(0.25)
+            .expect("learning rate update should succeed");
+        optimizer
+            .set_momentum(0.8)
+            .expect("momentum update should succeed");
+
+        assert_eq!(optimizer.learning_rate(), 0.25);
+        assert_eq!(optimizer.momentum(), 0.8);
+    }
+
+    #[test]
+    fn momentum_rejects_invalid_momentum_on_create() {
+        let error = Momentum::new(0.1, 1.0).expect_err("momentum must be below one");
+
+        assert_eq!(
+            error,
+            RustGradError::InvalidArgument {
+                name: "momentum",
+                reason: "momentum must be finite and in [0, 1)".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn momentum_rejects_invalid_momentum_on_update() {
+        let mut optimizer = Momentum::new(0.1, 0.5).expect("valid optimizer");
+
+        let error = optimizer
+            .set_momentum(f64::NAN)
+            .expect_err("nan momentum should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::InvalidArgument {
+                name: "momentum",
+                reason: "momentum must be finite and in [0, 1)".to_string(),
+            }
+        );
+        assert_eq!(optimizer.momentum(), 0.5);
+    }
+
+    #[test]
+    fn momentum_first_step_matches_sgd_and_initializes_velocity() {
+        let mut parameter = Tensor::vector(vec![1.0, 2.0]).expect("valid parameter");
+        let gradients =
+            GradientSet::from_tensors(vec![Tensor::vector(vec![0.5, -1.0]).expect("valid grad")]);
+        let mut optimizer = Momentum::new(0.1, 0.9).expect("valid optimizer");
+        let mut parameters = vec![&mut parameter];
+
+        optimizer
+            .step(&mut parameters, &gradients)
+            .expect("momentum step should succeed");
+
+        assert_slice_close(parameter.data(), &[0.95, 2.1]);
+        assert_eq!(optimizer.velocity().len(), 1);
+        assert_slice_close(optimizer.velocity()[0].data(), &[0.5, -1.0]);
+    }
+
+    #[test]
+    fn momentum_accumulates_velocity_across_steps() {
+        let mut parameter = Tensor::vector(vec![1.0, 2.0]).expect("valid parameter");
+        let gradients =
+            GradientSet::from_tensors(vec![Tensor::vector(vec![0.5, -1.0]).expect("valid grad")]);
+        let mut optimizer = Momentum::new(0.1, 0.9).expect("valid optimizer");
+
+        {
+            let mut parameters = vec![&mut parameter];
+            optimizer
+                .step(&mut parameters, &gradients)
+                .expect("first step should succeed");
+        }
+        {
+            let mut parameters = vec![&mut parameter];
+            optimizer
+                .step(&mut parameters, &gradients)
+                .expect("second step should succeed");
+        }
+
+        assert_slice_close(optimizer.velocity()[0].data(), &[0.95, -1.9]);
+        assert_slice_close(parameter.data(), &[0.855, 2.29]);
+    }
+
+    #[test]
+    fn momentum_updates_multiple_parameter_tensors() {
+        let mut weights = Tensor::matrix(1, 2, vec![1.0, 2.0]).expect("valid weights");
+        let mut bias = Tensor::vector(vec![0.5, -0.5]).expect("valid bias");
+        let gradients = GradientSet::from_tensors(vec![
+            Tensor::matrix(1, 2, vec![0.2, -0.4]).expect("valid weight gradient"),
+            Tensor::vector(vec![1.0, -1.0]).expect("valid bias gradient"),
+        ]);
+        let mut optimizer = Momentum::new(0.5, 0.9).expect("valid optimizer");
+        let mut parameters = vec![&mut weights, &mut bias];
+
+        optimizer
+            .step(&mut parameters, &gradients)
+            .expect("momentum step should succeed");
+
+        assert_slice_close(weights.data(), &[0.9, 2.2]);
+        assert_slice_close(bias.data(), &[0.0, 0.0]);
+        assert_eq!(optimizer.velocity().len(), 2);
+        assert_slice_close(optimizer.velocity()[0].data(), &[0.2, -0.4]);
+        assert_slice_close(optimizer.velocity()[1].data(), &[1.0, -1.0]);
+    }
+
+    #[test]
+    fn momentum_reset_state_clears_velocity() {
+        let mut parameter = Tensor::scalar(1.0).expect("valid parameter");
+        let gradients =
+            GradientSet::from_tensors(vec![Tensor::scalar(0.5).expect("valid gradient")]);
+        let mut optimizer = Momentum::new(0.1, 0.9).expect("valid optimizer");
+        let mut parameters = vec![&mut parameter];
+
+        optimizer
+            .step(&mut parameters, &gradients)
+            .expect("momentum step should succeed");
+        assert_eq!(optimizer.velocity().len(), 1);
+
+        optimizer.reset_state();
+
+        assert!(optimizer.velocity().is_empty());
+    }
+
+    #[test]
+    fn momentum_rebuilds_velocity_when_parameter_shapes_change() {
+        let mut first_parameter = Tensor::vector(vec![1.0, 2.0]).expect("valid parameter");
+        let first_gradients =
+            GradientSet::from_tensors(vec![Tensor::vector(vec![0.5, 0.5]).expect("valid grad")]);
+        let mut optimizer = Momentum::new(0.1, 0.9).expect("valid optimizer");
+
+        {
+            let mut parameters = vec![&mut first_parameter];
+            optimizer
+                .step(&mut parameters, &first_gradients)
+                .expect("first step should succeed");
+        }
+        assert_eq!(optimizer.velocity()[0].dims(), &[2]);
+
+        let mut second_parameter = Tensor::matrix(1, 1, vec![3.0]).expect("valid parameter");
+        let second_gradients =
+            GradientSet::from_tensors(vec![Tensor::matrix(1, 1, vec![2.0]).expect("valid grad")]);
+        {
+            let mut parameters = vec![&mut second_parameter];
+            optimizer
+                .step(&mut parameters, &second_gradients)
+                .expect("second shape should rebuild velocity");
+        }
+
+        assert_eq!(optimizer.velocity().len(), 1);
+        assert_eq!(optimizer.velocity()[0].dims(), &[1, 1]);
+        assert_slice_close(optimizer.velocity()[0].data(), &[2.0]);
+        assert_slice_close(second_parameter.data(), &[2.8]);
+    }
+
+    #[test]
+    fn momentum_rejects_gradient_count_mismatch() {
+        let mut parameter = Tensor::scalar(1.0).expect("valid parameter");
+        let gradients = GradientSet::new();
+        let mut optimizer = Momentum::new(0.1, 0.9).expect("valid optimizer");
+        let mut parameters = vec![&mut parameter];
+
+        let error = optimizer
+            .step(&mut parameters, &gradients)
+            .expect_err("missing gradient should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::InvalidArgument {
+                name: "gradients",
+                reason: "expected 1 gradients, got 0".to_string(),
+            }
+        );
+        assert!(optimizer.velocity().is_empty());
+    }
+
+    #[test]
+    fn momentum_rejects_gradient_shape_mismatch_without_initializing_velocity() {
+        let mut parameter = Tensor::vector(vec![1.0, 2.0]).expect("valid parameter");
+        let gradients =
+            GradientSet::from_tensors(vec![Tensor::scalar(1.0).expect("invalid gradient")]);
+        let mut optimizer = Momentum::new(0.1, 0.9).expect("valid optimizer");
+        let mut parameters = vec![&mut parameter];
+
+        let error = optimizer
+            .step(&mut parameters, &gradients)
+            .expect_err("shape mismatch should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::ShapeMismatch {
+                op: "optimizer gradient",
+                left: vec![2],
+                right: vec![1],
+            }
+        );
+        assert!(optimizer.velocity().is_empty());
+        assert_slice_close(parameter.data(), &[1.0, 2.0]);
     }
 }
