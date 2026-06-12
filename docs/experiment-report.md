@@ -6,6 +6,10 @@ small reverse-mode automatic differentiation engine, adds neural-network
 building blocks and optimizers, then exposes runnable training examples through
 a command-line interface.
 
+Module-level details are documented separately in `docs/autograd.md`,
+`docs/training.md`, and `docs/testing.md`. This report focuses on how those
+parts fit together as a complete experiment.
+
 The scope is intentionally controlled. The project stays CPU-only and uses
 deterministic synthetic datasets. This keeps the implementation readable while
 still covering the important contracts in a training system: tensor shapes must
@@ -221,6 +225,9 @@ commands exercise the same code paths as tests.
 RustGrad 是一个 Rust 课程项目，实现了一个小型深度学习框架的核心路径。项目
 从稠密张量运算开始，构建小型反向模式自动求导引擎，加入神经网络组件和优化
 器，并通过命令行工具提供可运行的训练示例。
+
+更细的模块说明见 `docs/autograd.md`、`docs/training.md` 和
+`docs/testing.md`。本报告关注这些部分如何组成一个完整实验。
 
 项目范围经过控制。当前实现保持 CPU-only，并使用确定性的合成数据集。这样代
 码仍然适合阅读，同时覆盖训练系统中的关键约定：张量 shape 需要被检查，计算

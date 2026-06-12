@@ -43,6 +43,18 @@ tests/
   cli.rs      end-to-end CLI integration tests
 ```
 
+## Documentation
+
+- [Autograd design](docs/autograd.md): computation graph, backward propagation,
+  gradient accumulation, and shape handling.
+- [Training workflow](docs/training.md): datasets, training loops, optimizer
+  flow, CLI examples, and report export.
+- [Testing strategy](docs/testing.md): unit tests, CLI tests, integration
+  coverage, reproducibility, and Windows notes.
+- [Technical report](docs/experiment-report.md): bilingual course report that
+  connects the architecture, implementation, validation, and limits.
+- [Changelog](CHANGELOG.md): project milestone summary and known limits.
+
 ## Quick Start
 
 Build and run the tests:
