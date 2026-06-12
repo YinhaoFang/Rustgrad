@@ -351,3 +351,329 @@ fn validate_finite(name: &'static str, value: f64) -> Result<()> {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        binary_accuracy, categorical_accuracy, mean_absolute_error, mean_squared_error,
+        TrainingConfig, TrainingHistory, TrainingRecord,
+    };
+    use crate::tensor::Tensor;
+    use crate::RustGradError;
+
+    const EPSILON: f64 = 1e-12;
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < EPSILON,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn training_config_stores_values_and_default_logging() {
+        let config = TrainingConfig::new(10, 0.05).expect("valid config");
+
+        assert_eq!(config.epochs(), 10);
+        assert_eq!(config.learning_rate(), 0.05);
+        assert_eq!(config.log_every(), 1);
+        assert!(config.should_log(1));
+        assert!(config.should_log(10));
+        assert!(config.should_log(7));
+    }
+
+    #[test]
+    fn training_config_supports_custom_logging_interval() {
+        let config = TrainingConfig::new(10, 0.05)
+            .expect("valid config")
+            .with_log_every(3)
+            .expect("valid log interval");
+
+        assert_eq!(config.log_every(), 3);
+        assert!(config.should_log(1));
+        assert!(config.should_log(3));
+        assert!(config.should_log(6));
+        assert!(config.should_log(10));
+        assert!(!config.should_log(2));
+        assert!(!config.should_log(4));
+    }
+
+    #[test]
+    fn training_config_rejects_zero_epochs() {
+        let error = TrainingConfig::new(0, 0.1).expect_err("zero epochs should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::InvalidArgument {
+                name: "epochs",
+                reason: "value must be greater than zero".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn training_config_rejects_invalid_learning_rate() {
+        let error =
+            TrainingConfig::new(10, f64::INFINITY).expect_err("invalid learning rate should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::InvalidArgument {
+                name: "learning_rate",
+                reason: "value must be finite and greater than zero".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn training_config_rejects_zero_log_interval() {
+        let error = TrainingConfig::new(10, 0.1)
+            .expect("valid config")
+            .with_log_every(0)
+            .expect_err("zero log interval should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::InvalidArgument {
+                name: "log_every",
+                reason: "value must be greater than zero".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn training_record_stores_epoch_loss_and_accuracy() {
+        let record = TrainingRecord::new(3, 0.25, Some(0.75)).expect("valid record");
+
+        assert_eq!(record.epoch(), 3);
+        assert_eq!(record.loss(), 0.25);
+        assert_eq!(record.accuracy(), Some(0.75));
+    }
+
+    #[test]
+    fn training_record_allows_missing_accuracy() {
+        let record = TrainingRecord::new(1, 1.5, None).expect("valid record");
+
+        assert_eq!(record.accuracy(), None);
+    }
+
+    #[test]
+    fn training_record_rejects_invalid_epoch() {
+        let error = TrainingRecord::new(0, 1.0, None).expect_err("zero epoch should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::InvalidArgument {
+                name: "epoch",
+                reason: "value must be greater than zero".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn training_record_rejects_invalid_loss() {
+        let error = TrainingRecord::new(1, -1.0, None).expect_err("negative loss should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::InvalidArgument {
+                name: "loss",
+                reason: "metric must be finite and non-negative".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn training_record_rejects_invalid_accuracy() {
+        let error =
+            TrainingRecord::new(1, 1.0, Some(1.5)).expect_err("accuracy above one should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::InvalidArgument {
+                name: "accuracy",
+                reason: "accuracy must be finite and in [0, 1]".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn training_history_starts_empty() {
+        let history = TrainingHistory::new();
+
+        assert!(history.is_empty());
+        assert_eq!(history.len(), 0);
+        assert!(history.last().is_none());
+        assert_eq!(history.initial_loss(), None);
+        assert_eq!(history.final_loss(), None);
+        assert_eq!(history.best_loss(), None);
+        assert_eq!(history.best_accuracy(), None);
+        assert!(!history.loss_decreased());
+    }
+
+    #[test]
+    fn training_history_tracks_loss_and_accuracy() {
+        let mut history = TrainingHistory::new();
+        history.push(TrainingRecord::new(1, 2.0, Some(0.25)).expect("valid record"));
+        history.push(TrainingRecord::new(2, 1.5, Some(0.5)).expect("valid record"));
+        history.push(TrainingRecord::new(3, 1.0, Some(0.75)).expect("valid record"));
+
+        assert_eq!(history.len(), 3);
+        assert_eq!(history.records()[0].epoch(), 1);
+        assert_eq!(history.last().map(TrainingRecord::epoch), Some(3));
+        assert_eq!(history.initial_loss(), Some(2.0));
+        assert_eq!(history.final_loss(), Some(1.0));
+        assert_eq!(history.best_loss(), Some(1.0));
+        assert_eq!(history.best_accuracy(), Some(0.75));
+        assert_eq!(history.losses(), vec![2.0, 1.5, 1.0]);
+        assert!(history.loss_decreased());
+    }
+
+    #[test]
+    fn training_history_can_be_created_from_records() {
+        let records = vec![
+            TrainingRecord::new(1, 0.8, None).expect("valid record"),
+            TrainingRecord::new(2, 0.9, None).expect("valid record"),
+        ];
+
+        let history = TrainingHistory::from_records(records);
+
+        assert_eq!(history.len(), 2);
+        assert_eq!(history.best_loss(), Some(0.8));
+        assert!(!history.loss_decreased());
+    }
+
+    #[test]
+    fn mean_squared_error_computes_average_squared_difference() {
+        let predictions = Tensor::vector(vec![1.0, 2.0, 4.0]).expect("valid predictions");
+        let targets = Tensor::vector(vec![1.0, 1.0, 1.0]).expect("valid targets");
+
+        let value = mean_squared_error(&predictions, &targets).expect("mse should compute");
+
+        assert_close(value, 10.0 / 3.0);
+    }
+
+    #[test]
+    fn mean_absolute_error_computes_average_absolute_difference() {
+        let predictions = Tensor::vector(vec![1.0, 2.0, 4.0]).expect("valid predictions");
+        let targets = Tensor::vector(vec![1.0, 1.0, 1.0]).expect("valid targets");
+
+        let value = mean_absolute_error(&predictions, &targets).expect("mae should compute");
+
+        assert_close(value, 4.0 / 3.0);
+    }
+
+    #[test]
+    fn metric_functions_reject_shape_mismatch() {
+        let predictions = Tensor::vector(vec![1.0, 2.0]).expect("valid predictions");
+        let targets = Tensor::matrix(1, 2, vec![1.0, 2.0]).expect("valid targets");
+
+        assert_eq!(
+            mean_squared_error(&predictions, &targets).expect_err("shape mismatch should fail"),
+            RustGradError::ShapeMismatch {
+                op: "mean squared error",
+                left: vec![2],
+                right: vec![1, 2],
+            }
+        );
+        assert_eq!(
+            mean_absolute_error(&predictions, &targets).expect_err("shape mismatch should fail"),
+            RustGradError::ShapeMismatch {
+                op: "mean absolute error",
+                left: vec![2],
+                right: vec![1, 2],
+            }
+        );
+    }
+
+    #[test]
+    fn binary_accuracy_thresholds_predictions() {
+        let predictions = Tensor::vector(vec![0.1, 0.6, 0.8, 0.2]).expect("valid predictions");
+        let targets = Tensor::vector(vec![0.0, 1.0, 0.0, 0.0]).expect("valid targets");
+
+        let value = binary_accuracy(&predictions, &targets, 0.5).expect("accuracy should compute");
+
+        assert_close(value, 0.75);
+    }
+
+    #[test]
+    fn binary_accuracy_rejects_invalid_threshold() {
+        let predictions = Tensor::vector(vec![0.1]).expect("valid predictions");
+        let targets = Tensor::vector(vec![0.0]).expect("valid targets");
+
+        let error = binary_accuracy(&predictions, &targets, f64::NAN)
+            .expect_err("nan threshold should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::InvalidArgument {
+                name: "threshold",
+                reason: "value must be finite".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn binary_accuracy_rejects_shape_mismatch() {
+        let predictions = Tensor::vector(vec![0.1, 0.6]).expect("valid predictions");
+        let targets = Tensor::vector(vec![0.0]).expect("valid targets");
+
+        let error =
+            binary_accuracy(&predictions, &targets, 0.5).expect_err("shape mismatch should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::ShapeMismatch {
+                op: "binary accuracy",
+                left: vec![2],
+                right: vec![1],
+            }
+        );
+    }
+
+    #[test]
+    fn categorical_accuracy_compares_argmax_classes() {
+        let predictions = Tensor::matrix(3, 3, vec![0.1, 0.8, 0.1, 0.4, 0.3, 0.3, 0.2, 0.2, 0.6])
+            .expect("valid predictions");
+        let targets = Tensor::matrix(3, 3, vec![0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0])
+            .expect("valid targets");
+
+        let value = categorical_accuracy(&predictions, &targets).expect("accuracy should compute");
+
+        assert_close(value, 2.0 / 3.0);
+    }
+
+    #[test]
+    fn categorical_accuracy_rejects_shape_mismatch() {
+        let predictions = Tensor::matrix(1, 2, vec![0.1, 0.9]).expect("valid predictions");
+        let targets = Tensor::matrix(1, 3, vec![0.0, 1.0, 0.0]).expect("valid targets");
+
+        let error =
+            categorical_accuracy(&predictions, &targets).expect_err("shape mismatch should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::ShapeMismatch {
+                op: "categorical accuracy",
+                left: vec![1, 2],
+                right: vec![1, 3],
+            }
+        );
+    }
+
+    #[test]
+    fn categorical_accuracy_rejects_rank_one_tensors() {
+        let predictions = Tensor::vector(vec![0.1, 0.9]).expect("valid predictions");
+        let targets = Tensor::vector(vec![0.0, 1.0]).expect("valid targets");
+
+        let error = categorical_accuracy(&predictions, &targets).expect_err("rank one should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::InvalidArgument {
+                name: "predictions",
+                reason: "expected rank 2 tensor, got rank 1".to_string(),
+            }
+        );
+    }
+}
