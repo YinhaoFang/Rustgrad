@@ -1,7 +1,8 @@
 //! Reusable training loops and training metrics.
 
-use crate::data::{xor, Dataset};
-use crate::nn::{sigmoid, Linear, Module};
+use crate::data::{spiral, xor, Dataset};
+use crate::loss::{CrossEntropyLoss, Loss};
+use crate::nn::{sigmoid, softmax, Linear, Module};
 use crate::optim::{GradientSet, Optimizer, SGD};
 use crate::tensor::Tensor;
 use crate::{Result, RustGradError};
@@ -383,6 +384,55 @@ impl XorTrainingResult {
     }
 }
 
+/// Result produced by spiral multi-class classifier training.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpiralTrainingResult {
+    model: Linear,
+    history: TrainingHistory,
+    classes: usize,
+}
+
+impl SpiralTrainingResult {
+    /// Creates a result from a trained softmax classifier and its history.
+    #[must_use]
+    pub fn new(model: Linear, history: TrainingHistory, classes: usize) -> Self {
+        Self {
+            model,
+            history,
+            classes,
+        }
+    }
+
+    /// Returns the trained linear classifier.
+    #[must_use]
+    pub fn model(&self) -> &Linear {
+        &self.model
+    }
+
+    /// Returns the training history.
+    #[must_use]
+    pub fn history(&self) -> &TrainingHistory {
+        &self.history
+    }
+
+    /// Returns the number of output classes.
+    #[must_use]
+    pub fn classes(&self) -> usize {
+        self.classes
+    }
+
+    /// Predicts class probabilities for raw two-dimensional spiral features.
+    pub fn predict_proba(&self, features: &Tensor) -> Result<Tensor> {
+        let mapped = spiral_feature_map(features)?;
+        softmax(&self.model.forward(&mapped)?)
+    }
+
+    /// Predicts classes as one-hot rows.
+    pub fn predict_classes(&self, features: &Tensor) -> Result<Tensor> {
+        probabilities_to_one_hot(&self.predict_proba(features)?)
+    }
+}
+
 /// Trains a linear layer on a supervised regression dataset using MSE and SGD.
 ///
 /// This loop intentionally keeps the gradient formula explicit so the example
@@ -484,6 +534,52 @@ pub fn train_xor_mlp(config: TrainingConfig) -> Result<XorTrainingResult> {
     }
 
     Ok(XorTrainingResult::new(model, history))
+}
+
+/// Trains a softmax classifier on the deterministic spiral dataset.
+///
+/// The raw spiral is not linearly separable in `(x, y)`. This teaching example
+/// uses a compact polar feature map before a linear softmax head, making the
+/// training loop easy to inspect while still demonstrating a non-linear
+/// classification workflow.
+pub fn train_spiral_classifier(
+    samples_per_class: usize,
+    classes: usize,
+    config: TrainingConfig,
+) -> Result<SpiralTrainingResult> {
+    let dataset = spiral(samples_per_class, classes)?;
+    validate_one_hot_targets(dataset.targets())?;
+
+    let mapped_features = spiral_feature_map(dataset.features())?;
+    let input_size = mapped_features
+        .cols()
+        .expect("rank 2 tensors always have columns");
+    let mut model = Linear::new(input_size, classes)?;
+    let mut optimizer = SGD::new(config.learning_rate())?;
+    let loss = CrossEntropyLoss::new();
+    let mut history = TrainingHistory::new();
+
+    for epoch in 1..=config.epochs() {
+        let logits = model.forward(&mapped_features)?;
+        let probabilities = softmax(&logits)?;
+        let gradients =
+            softmax_cross_entropy_gradients(&mapped_features, &probabilities, dataset.targets())?;
+
+        {
+            let mut parameters = model.parameters_mut();
+            optimizer.step(&mut parameters, &gradients)?;
+        }
+
+        let updated_logits = model.forward(&mapped_features)?;
+        let updated_probabilities = softmax(&updated_logits)?;
+        let epoch_loss = loss
+            .forward(&updated_logits, dataset.targets())?
+            .get_flat(0)?;
+        let accuracy = categorical_accuracy(&updated_probabilities, dataset.targets())?;
+        history.push(TrainingRecord::new(epoch, epoch_loss, Some(accuracy))?);
+    }
+
+    Ok(SpiralTrainingResult::new(model, history, classes))
 }
 
 /// Computes mean squared error between two tensors.
@@ -594,6 +690,27 @@ fn threshold_probabilities(probabilities: &Tensor, threshold: f64) -> Result<Ten
             )
             .collect(),
     )
+}
+
+fn probabilities_to_one_hot(probabilities: &Tensor) -> Result<Tensor> {
+    validate_rank_two("probabilities", probabilities)?;
+
+    let rows = probabilities
+        .rows()
+        .expect("rank 2 tensors always have rows");
+    let cols = probabilities
+        .cols()
+        .expect("rank 2 tensors always have columns");
+    let mut data = vec![0.0; probabilities.len()];
+
+    for row in 0..rows {
+        let start = row * cols;
+        let end = start + cols;
+        let class_index = argmax(&probabilities.data()[start..end]);
+        data[start + class_index] = 1.0;
+    }
+
+    Tensor::matrix(rows, cols, data)
 }
 
 fn linear_mse_gradients(
@@ -747,6 +864,74 @@ fn xor_mlp_gradients(
     ]))
 }
 
+fn softmax_cross_entropy_gradients(
+    features: &Tensor,
+    probabilities: &Tensor,
+    targets: &Tensor,
+) -> Result<GradientSet> {
+    validate_rank_two("features", features)?;
+    validate_rank_two("probabilities", probabilities)?;
+    validate_rank_two("targets", targets)?;
+    ensure_same_shape("softmax targets", probabilities, targets)?;
+    validate_one_hot_targets(targets)?;
+
+    let rows = features.rows().expect("rank 2 tensors always have rows");
+    let input_size = features.cols().expect("rank 2 tensors always have columns");
+    let classes = probabilities
+        .cols()
+        .expect("rank 2 tensors always have columns");
+    let scale = 1.0 / rows as f64;
+    let mut weight_grad = vec![0.0; input_size * classes];
+    let mut bias_grad = vec![0.0; classes];
+
+    for row in 0..rows {
+        for (class_index, bias) in bias_grad.iter_mut().enumerate().take(classes) {
+            let error = (probabilities.get(&[row, class_index])?
+                - targets.get(&[row, class_index])?)
+                * scale;
+            *bias += error;
+
+            for input_col in 0..input_size {
+                let index = input_col * classes + class_index;
+                weight_grad[index] += features.get(&[row, input_col])? * error;
+            }
+        }
+    }
+
+    Ok(GradientSet::from_tensors(vec![
+        Tensor::matrix(input_size, classes, weight_grad)?,
+        Tensor::vector(bias_grad)?,
+    ]))
+}
+
+fn spiral_feature_map(features: &Tensor) -> Result<Tensor> {
+    validate_rank_two("features", features)?;
+    if features.cols() != Some(2) {
+        return Err(RustGradError::InvalidArgument {
+            name: "features",
+            reason: format!(
+                "spiral feature map expects two columns, got {}",
+                features.cols().expect("rank 2 tensors always have columns")
+            ),
+        });
+    }
+
+    let rows = features.rows().expect("rank 2 tensors always have rows");
+    let mut mapped = Vec::with_capacity(rows * 2);
+
+    for row in 0..rows {
+        let x = features.get(&[row, 0])?;
+        let y = features.get(&[row, 1])?;
+        let radius = (x * x + y * y).sqrt();
+        let angle = x.atan2(y);
+        let phase = angle - radius * std::f64::consts::TAU;
+        mapped.push(phase.cos());
+        mapped.push(phase.sin());
+    }
+
+    Tensor::matrix(rows, 2, mapped)
+}
+
 fn validate_binary_classification_dataset(dataset: &Dataset) -> Result<()> {
     if dataset.target_size() != 1 {
         return Err(RustGradError::InvalidArgument {
@@ -773,6 +958,41 @@ fn validate_binary_targets(targets: &Tensor) -> Result<()> {
             name: "targets",
             reason: "binary targets must contain only 0.0 or 1.0".to_string(),
         });
+    }
+
+    Ok(())
+}
+
+fn validate_one_hot_targets(targets: &Tensor) -> Result<()> {
+    validate_rank_two("targets", targets)?;
+
+    let rows = targets.rows().expect("rank 2 tensors always have rows");
+    let cols = targets.cols().expect("rank 2 tensors always have columns");
+    if cols < 2 {
+        return Err(RustGradError::InvalidArgument {
+            name: "targets",
+            reason: "one-hot targets need at least two classes".to_string(),
+        });
+    }
+
+    for row in 0..rows {
+        let start = row * cols;
+        let end = start + cols;
+        let row_values = &targets.data()[start..end];
+        let active = row_values
+            .iter()
+            .filter(|&&value| (value - 1.0).abs() <= f64::EPSILON)
+            .count();
+        let all_binary = row_values.iter().all(|&value| {
+            (value - 0.0).abs() <= f64::EPSILON || (value - 1.0).abs() <= f64::EPSILON
+        });
+
+        if active != 1 || !all_binary {
+            return Err(RustGradError::InvalidArgument {
+                name: "targets",
+                reason: "targets must be one-hot encoded rows".to_string(),
+            });
+        }
     }
 
     Ok(())
@@ -869,10 +1089,10 @@ fn validate_finite(name: &'static str, value: f64) -> Result<()> {
 mod tests {
     use super::{
         binary_accuracy, categorical_accuracy, mean_absolute_error, mean_squared_error,
-        train_binary_classification, train_linear_regression, train_xor_mlp, TrainingConfig,
-        TrainingHistory, TrainingRecord,
+        train_binary_classification, train_linear_regression, train_spiral_classifier,
+        train_xor_mlp, TrainingConfig, TrainingHistory, TrainingRecord,
     };
-    use crate::data::{linear_regression, xor, Dataset};
+    use crate::data::{linear_regression, spiral, xor, Dataset};
     use crate::tensor::Tensor;
     use crate::RustGradError;
 
@@ -1405,6 +1625,104 @@ mod tests {
         assert!(probabilities.get(&[1, 0]).expect("probability exists") > 0.5);
         assert!(probabilities.get(&[2, 0]).expect("probability exists") > 0.5);
         assert!(probabilities.get(&[3, 0]).expect("probability exists") < 0.5);
+    }
+
+    #[test]
+    fn train_spiral_classifier_records_loss_and_accuracy() {
+        let config = TrainingConfig::new(40, 0.5).expect("valid config");
+
+        let result = train_spiral_classifier(6, 3, config).expect("training should succeed");
+
+        assert_eq!(result.history().len(), 40);
+        assert_eq!(result.history().records()[0].epoch(), 1);
+        assert_eq!(result.history().last().map(TrainingRecord::epoch), Some(40));
+        assert_eq!(result.classes(), 3);
+        assert_eq!(result.model().weights().dims(), &[2, 3]);
+        assert!(result
+            .history()
+            .records()
+            .iter()
+            .all(|record| record.accuracy().is_some()));
+    }
+
+    #[test]
+    fn train_spiral_classifier_decreases_loss_on_mapped_features() {
+        let config = TrainingConfig::new(160, 0.7).expect("valid config");
+
+        let result = train_spiral_classifier(12, 3, config).expect("training should succeed");
+
+        assert!(result.history().loss_decreased());
+        assert!(
+            result.history().final_loss().expect("final loss exists")
+                < result
+                    .history()
+                    .initial_loss()
+                    .expect("initial loss exists"),
+            "expected spiral loss to decrease, got {:?}",
+            result.history().losses()
+        );
+        assert!(
+            result.history().best_accuracy().expect("accuracy exists") >= 0.8,
+            "expected useful spiral accuracy, got {:?}",
+            result.history().best_accuracy()
+        );
+    }
+
+    #[test]
+    fn spiral_classifier_predicts_probability_rows_and_one_hot_classes() {
+        let dataset = spiral(8, 3).expect("valid spiral dataset");
+        let config = TrainingConfig::new(120, 0.7).expect("valid config");
+        let result = train_spiral_classifier(8, 3, config).expect("training should succeed");
+
+        let probabilities = result
+            .predict_proba(dataset.features())
+            .expect("probabilities should compute");
+        let classes = result
+            .predict_classes(dataset.features())
+            .expect("classes should compute");
+
+        assert_eq!(probabilities.dims(), &[24, 3]);
+        assert_eq!(classes.dims(), &[24, 3]);
+
+        for row in 0..24 {
+            let probability_sum: f64 = (0..3)
+                .map(|class_index| {
+                    probabilities
+                        .get(&[row, class_index])
+                        .expect("probability exists")
+                })
+                .sum();
+            let class_sum: f64 = (0..3)
+                .map(|class_index| classes.get(&[row, class_index]).expect("class exists"))
+                .sum();
+
+            assert_close_with(probability_sum, 1.0, 1e-10);
+            assert_close(class_sum, 1.0);
+        }
+    }
+
+    #[test]
+    fn train_spiral_classifier_rejects_invalid_dataset_configuration() {
+        let config = TrainingConfig::new(10, 0.3).expect("valid config");
+
+        let zero_samples =
+            train_spiral_classifier(0, 3, config).expect_err("zero samples should fail");
+        let one_class = train_spiral_classifier(4, 1, config).expect_err("one class should fail");
+
+        assert_eq!(
+            zero_samples,
+            RustGradError::InvalidArgument {
+                name: "samples_per_class",
+                reason: "value must be greater than zero".to_string(),
+            }
+        );
+        assert_eq!(
+            one_class,
+            RustGradError::InvalidArgument {
+                name: "classes",
+                reason: "classes must be at least 2".to_string(),
+            }
+        );
     }
 
     #[test]
