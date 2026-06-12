@@ -1,7 +1,7 @@
 //! Reusable training loops and training metrics.
 
 use crate::data::Dataset;
-use crate::nn::{Linear, Module};
+use crate::nn::{sigmoid, Linear, Module};
 use crate::optim::{GradientSet, Optimizer, SGD};
 use crate::tensor::Tensor;
 use crate::{Result, RustGradError};
@@ -228,6 +228,55 @@ impl LinearRegressionResult {
     }
 }
 
+/// Result produced by a binary classification training run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BinaryClassificationResult {
+    model: Linear,
+    history: TrainingHistory,
+    threshold: f64,
+}
+
+impl BinaryClassificationResult {
+    /// Creates a result from a trained model, its history, and class threshold.
+    #[must_use]
+    pub fn new(model: Linear, history: TrainingHistory, threshold: f64) -> Self {
+        Self {
+            model,
+            history,
+            threshold,
+        }
+    }
+
+    /// Returns the trained linear model.
+    #[must_use]
+    pub fn model(&self) -> &Linear {
+        &self.model
+    }
+
+    /// Returns the training history.
+    #[must_use]
+    pub fn history(&self) -> &TrainingHistory {
+        &self.history
+    }
+
+    /// Returns the probability threshold used for class prediction.
+    #[must_use]
+    pub fn threshold(&self) -> f64 {
+        self.threshold
+    }
+
+    /// Predicts positive-class probabilities.
+    pub fn predict_proba(&self, features: &Tensor) -> Result<Tensor> {
+        sigmoid(&self.model.forward(features)?)
+    }
+
+    /// Predicts binary classes as `0.0` or `1.0`.
+    pub fn predict_classes(&self, features: &Tensor) -> Result<Tensor> {
+        let probabilities = self.predict_proba(features)?;
+        threshold_probabilities(&probabilities, self.threshold)
+    }
+}
+
 /// Trains a linear layer on a supervised regression dataset using MSE and SGD.
 ///
 /// This loop intentionally keeps the gradient formula explicit so the example
@@ -259,6 +308,43 @@ pub fn train_linear_regression(
     }
 
     Ok(LinearRegressionResult::new(model, history))
+}
+
+/// Trains a logistic regression classifier using binary cross entropy and SGD.
+///
+/// Targets must be a single-column matrix containing `0.0` or `1.0`. The
+/// recorded accuracy is computed from probabilities after each update.
+pub fn train_binary_classification(
+    dataset: &Dataset,
+    config: TrainingConfig,
+    threshold: f64,
+) -> Result<BinaryClassificationResult> {
+    validate_finite("threshold", threshold)?;
+    validate_binary_classification_dataset(dataset)?;
+
+    let mut model = Linear::new(dataset.input_size(), 1)?;
+    let mut optimizer = SGD::new(config.learning_rate())?;
+    let mut history = TrainingHistory::new();
+
+    for epoch in 1..=config.epochs() {
+        let logits = model.forward(dataset.features())?;
+        let probabilities = sigmoid(&logits)?;
+        let (weight_grad, bias_grad) =
+            logistic_binary_gradients(dataset.features(), &probabilities, dataset.targets())?;
+        let gradients = GradientSet::from_tensors(vec![weight_grad, bias_grad]);
+
+        {
+            let mut parameters = model.parameters_mut();
+            optimizer.step(&mut parameters, &gradients)?;
+        }
+
+        let updated_probabilities = sigmoid(&model.forward(dataset.features())?)?;
+        let loss = binary_cross_entropy(&updated_probabilities, dataset.targets())?;
+        let accuracy = binary_accuracy(&updated_probabilities, dataset.targets(), threshold)?;
+        history.push(TrainingRecord::new(epoch, loss, Some(accuracy))?);
+    }
+
+    Ok(BinaryClassificationResult::new(model, history, threshold))
 }
 
 /// Computes mean squared error between two tensors.
@@ -333,6 +419,44 @@ pub fn categorical_accuracy(predictions: &Tensor, targets: &Tensor) -> Result<f6
     Ok(correct as f64 / rows as f64)
 }
 
+fn binary_cross_entropy(probabilities: &Tensor, targets: &Tensor) -> Result<f64> {
+    ensure_same_shape("binary cross entropy", probabilities, targets)?;
+    validate_binary_targets(targets)?;
+
+    let epsilon = 1e-12;
+    let total: f64 = probabilities
+        .data()
+        .iter()
+        .zip(targets.data())
+        .map(|(&probability, &target)| {
+            let probability = probability.clamp(epsilon, 1.0 - epsilon);
+            -(target * probability.ln() + (1.0 - target) * (1.0 - probability).ln())
+        })
+        .sum();
+
+    Ok(total / probabilities.len() as f64)
+}
+
+fn threshold_probabilities(probabilities: &Tensor, threshold: f64) -> Result<Tensor> {
+    validate_finite("threshold", threshold)?;
+    Tensor::from_vec(
+        probabilities.shape().to_vec(),
+        probabilities
+            .data()
+            .iter()
+            .map(
+                |&probability| {
+                    if probability >= threshold {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                },
+            )
+            .collect(),
+    )
+}
+
 fn linear_mse_gradients(
     features: &Tensor,
     predictions: &Tensor,
@@ -371,6 +495,81 @@ fn linear_mse_gradients(
         Tensor::matrix(input_size, output_size, weight_grad)?,
         Tensor::vector(bias_grad)?,
     ))
+}
+
+fn logistic_binary_gradients(
+    features: &Tensor,
+    probabilities: &Tensor,
+    targets: &Tensor,
+) -> Result<(Tensor, Tensor)> {
+    validate_rank_two("features", features)?;
+    validate_rank_two("probabilities", probabilities)?;
+    validate_rank_two("targets", targets)?;
+    ensure_same_shape("binary classification targets", probabilities, targets)?;
+    validate_binary_targets(targets)?;
+
+    if probabilities.cols() != Some(1) {
+        return Err(RustGradError::InvalidArgument {
+            name: "probabilities",
+            reason: format!(
+                "binary classification expects one output column, got {}",
+                probabilities
+                    .cols()
+                    .expect("rank 2 tensors always have columns")
+            ),
+        });
+    }
+
+    let rows = features.rows().expect("rank 2 tensors always have rows");
+    let input_size = features.cols().expect("rank 2 tensors always have columns");
+    let scale = 1.0 / rows as f64;
+    let mut weight_grad = vec![0.0; input_size];
+    let mut bias_grad = 0.0;
+
+    for row in 0..rows {
+        let error = probabilities.get(&[row, 0])? - targets.get(&[row, 0])?;
+        bias_grad += error * scale;
+
+        for (input_col, gradient) in weight_grad.iter_mut().enumerate().take(input_size) {
+            *gradient += features.get(&[row, input_col])? * error * scale;
+        }
+    }
+
+    Ok((
+        Tensor::matrix(input_size, 1, weight_grad)?,
+        Tensor::vector(vec![bias_grad])?,
+    ))
+}
+
+fn validate_binary_classification_dataset(dataset: &Dataset) -> Result<()> {
+    if dataset.target_size() != 1 {
+        return Err(RustGradError::InvalidArgument {
+            name: "targets",
+            reason: format!(
+                "binary classification expects one target column, got {}",
+                dataset.target_size()
+            ),
+        });
+    }
+
+    validate_binary_targets(dataset.targets())
+}
+
+fn validate_binary_targets(targets: &Tensor) -> Result<()> {
+    validate_rank_two("targets", targets)?;
+
+    if targets
+        .data()
+        .iter()
+        .any(|target| (*target - 0.0).abs() > f64::EPSILON && (*target - 1.0).abs() > f64::EPSILON)
+    {
+        return Err(RustGradError::InvalidArgument {
+            name: "targets",
+            reason: "binary targets must contain only 0.0 or 1.0".to_string(),
+        });
+    }
+
+    Ok(())
 }
 
 fn argmax(values: &[f64]) -> usize {
@@ -464,7 +663,8 @@ fn validate_finite(name: &'static str, value: f64) -> Result<()> {
 mod tests {
     use super::{
         binary_accuracy, categorical_accuracy, mean_absolute_error, mean_squared_error,
-        train_linear_regression, TrainingConfig, TrainingHistory, TrainingRecord,
+        train_binary_classification, train_linear_regression, TrainingConfig, TrainingHistory,
+        TrainingRecord,
     };
     use crate::data::{linear_regression, Dataset};
     use crate::tensor::Tensor;
@@ -790,6 +990,157 @@ mod tests {
             1e-4,
         );
         assert!(result.history().final_loss().expect("final loss exists") < 1e-6);
+    }
+
+    #[test]
+    fn train_binary_classification_records_loss_and_accuracy() {
+        let dataset = Dataset::new(
+            "threshold",
+            Tensor::matrix(4, 1, vec![-2.0, -1.0, 1.0, 2.0]).expect("valid features"),
+            Tensor::matrix(4, 1, vec![0.0, 0.0, 1.0, 1.0]).expect("valid targets"),
+        )
+        .expect("valid dataset");
+        let config = TrainingConfig::new(20, 0.4).expect("valid config");
+
+        let result =
+            train_binary_classification(&dataset, config, 0.5).expect("training should succeed");
+
+        assert_eq!(result.history().len(), 20);
+        assert_eq!(result.history().records()[0].epoch(), 1);
+        assert!(result
+            .history()
+            .records()
+            .iter()
+            .all(|record| record.accuracy().is_some()));
+        assert_eq!(result.threshold(), 0.5);
+    }
+
+    #[test]
+    fn train_binary_classification_decreases_loss_and_reaches_perfect_accuracy() {
+        let dataset = Dataset::new(
+            "threshold",
+            Tensor::matrix(6, 1, vec![-3.0, -2.0, -1.0, 1.0, 2.0, 3.0]).expect("valid features"),
+            Tensor::matrix(6, 1, vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]).expect("valid targets"),
+        )
+        .expect("valid dataset");
+        let config = TrainingConfig::new(80, 0.5).expect("valid config");
+
+        let result =
+            train_binary_classification(&dataset, config, 0.5).expect("training should succeed");
+
+        assert!(result.history().loss_decreased());
+        assert!(
+            result.history().final_loss().expect("final loss exists")
+                < result
+                    .history()
+                    .initial_loss()
+                    .expect("initial loss exists")
+                    * 0.25,
+            "expected classification loss to decrease strongly, got {:?}",
+            result.history().losses()
+        );
+        assert_eq!(result.history().best_accuracy(), Some(1.0));
+        assert!(
+            result
+                .model()
+                .weights()
+                .get(&[0, 0])
+                .expect("weight exists")
+                > 0.0
+        );
+    }
+
+    #[test]
+    fn binary_classification_result_predicts_probabilities_and_classes() {
+        let dataset = Dataset::new(
+            "threshold",
+            Tensor::matrix(6, 1, vec![-3.0, -2.0, -1.0, 1.0, 2.0, 3.0]).expect("valid features"),
+            Tensor::matrix(6, 1, vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]).expect("valid targets"),
+        )
+        .expect("valid dataset");
+        let config = TrainingConfig::new(100, 0.5).expect("valid config");
+        let result =
+            train_binary_classification(&dataset, config, 0.5).expect("training should succeed");
+        let inputs = Tensor::matrix(3, 1, vec![-2.0, 0.0, 2.0]).expect("valid inputs");
+
+        let probabilities = result
+            .predict_proba(&inputs)
+            .expect("probabilities should compute");
+        let classes = result
+            .predict_classes(&inputs)
+            .expect("classes should compute");
+
+        assert_eq!(probabilities.dims(), &[3, 1]);
+        assert_eq!(classes.dims(), &[3, 1]);
+        assert!(probabilities.get(&[0, 0]).expect("probability exists") < 0.5);
+        assert!(probabilities.get(&[2, 0]).expect("probability exists") > 0.5);
+        assert_eq!(classes.data(), &[0.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn train_binary_classification_rejects_multi_column_targets() {
+        let dataset = Dataset::new(
+            "bad-targets",
+            Tensor::matrix(2, 1, vec![-1.0, 1.0]).expect("valid features"),
+            Tensor::matrix(2, 2, vec![1.0, 0.0, 0.0, 1.0]).expect("valid targets"),
+        )
+        .expect("valid dataset");
+        let config = TrainingConfig::new(10, 0.1).expect("valid config");
+
+        let error = train_binary_classification(&dataset, config, 0.5)
+            .expect_err("multi-column targets should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::InvalidArgument {
+                name: "targets",
+                reason: "binary classification expects one target column, got 2".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn train_binary_classification_rejects_non_binary_targets() {
+        let dataset = Dataset::new(
+            "bad-targets",
+            Tensor::matrix(2, 1, vec![-1.0, 1.0]).expect("valid features"),
+            Tensor::matrix(2, 1, vec![0.0, 0.5]).expect("valid targets"),
+        )
+        .expect("valid dataset");
+        let config = TrainingConfig::new(10, 0.1).expect("valid config");
+
+        let error = train_binary_classification(&dataset, config, 0.5)
+            .expect_err("non-binary targets should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::InvalidArgument {
+                name: "targets",
+                reason: "binary targets must contain only 0.0 or 1.0".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn train_binary_classification_rejects_invalid_threshold() {
+        let dataset = Dataset::new(
+            "threshold",
+            Tensor::matrix(2, 1, vec![-1.0, 1.0]).expect("valid features"),
+            Tensor::matrix(2, 1, vec![0.0, 1.0]).expect("valid targets"),
+        )
+        .expect("valid dataset");
+        let config = TrainingConfig::new(10, 0.1).expect("valid config");
+
+        let error = train_binary_classification(&dataset, config, f64::NAN)
+            .expect_err("nan threshold should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::InvalidArgument {
+                name: "threshold",
+                reason: "value must be finite".to_string(),
+            }
+        );
     }
 
     #[test]
