@@ -1,5 +1,8 @@
 //! Reusable training loops and training metrics.
 
+use crate::data::Dataset;
+use crate::nn::{Linear, Module};
+use crate::optim::{GradientSet, Optimizer, SGD};
 use crate::tensor::Tensor;
 use crate::{Result, RustGradError};
 
@@ -193,6 +196,71 @@ impl TrainingHistory {
     }
 }
 
+/// Result produced by a small supervised training run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinearRegressionResult {
+    model: Linear,
+    history: TrainingHistory,
+}
+
+impl LinearRegressionResult {
+    /// Creates a result from a trained model and its history.
+    #[must_use]
+    pub fn new(model: Linear, history: TrainingHistory) -> Self {
+        Self { model, history }
+    }
+
+    /// Returns the trained linear model.
+    #[must_use]
+    pub fn model(&self) -> &Linear {
+        &self.model
+    }
+
+    /// Returns the training history.
+    #[must_use]
+    pub fn history(&self) -> &TrainingHistory {
+        &self.history
+    }
+
+    /// Runs prediction with the trained model.
+    pub fn predict(&self, features: &Tensor) -> Result<Tensor> {
+        self.model.forward(features)
+    }
+}
+
+/// Trains a linear layer on a supervised regression dataset using MSE and SGD.
+///
+/// This loop intentionally keeps the gradient formula explicit so the example
+/// remains easy to inspect in reports: it computes the MSE gradient for
+/// `output = input @ weights + bias`, then delegates the parameter update to
+/// the optimizer module.
+pub fn train_linear_regression(
+    dataset: &Dataset,
+    config: TrainingConfig,
+) -> Result<LinearRegressionResult> {
+    let mut model = Linear::new(dataset.input_size(), dataset.target_size())?;
+    let mut optimizer = SGD::new(config.learning_rate())?;
+    let mut history = TrainingHistory::new();
+
+    for epoch in 1..=config.epochs() {
+        let predictions = model.forward(dataset.features())?;
+        let (weight_grad, bias_grad) =
+            linear_mse_gradients(dataset.features(), &predictions, dataset.targets())?;
+        let gradients = GradientSet::from_tensors(vec![weight_grad, bias_grad]);
+
+        {
+            let mut parameters = model.parameters_mut();
+            optimizer.step(&mut parameters, &gradients)?;
+        }
+
+        let updated_predictions = model.forward(dataset.features())?;
+        let loss = mean_squared_error(&updated_predictions, dataset.targets())?;
+        history.push(TrainingRecord::new(epoch, loss, None)?);
+    }
+
+    Ok(LinearRegressionResult::new(model, history))
+}
+
 /// Computes mean squared error between two tensors.
 pub fn mean_squared_error(predictions: &Tensor, targets: &Tensor) -> Result<f64> {
     ensure_same_shape("mean squared error", predictions, targets)?;
@@ -263,6 +331,46 @@ pub fn categorical_accuracy(predictions: &Tensor, targets: &Tensor) -> Result<f6
     }
 
     Ok(correct as f64 / rows as f64)
+}
+
+fn linear_mse_gradients(
+    features: &Tensor,
+    predictions: &Tensor,
+    targets: &Tensor,
+) -> Result<(Tensor, Tensor)> {
+    validate_rank_two("features", features)?;
+    validate_rank_two("predictions", predictions)?;
+    validate_rank_two("targets", targets)?;
+    ensure_same_shape("linear regression targets", predictions, targets)?;
+
+    let rows = features.rows().expect("rank 2 tensors always have rows");
+    let input_size = features.cols().expect("rank 2 tensors always have columns");
+    let output_size = predictions
+        .cols()
+        .expect("rank 2 tensors always have columns");
+    let scale = 2.0 / predictions.len() as f64;
+    let mut weight_grad = vec![0.0; input_size * output_size];
+    let mut bias_grad = vec![0.0; output_size];
+
+    for row in 0..rows {
+        for output_col in 0..output_size {
+            let prediction = predictions.get(&[row, output_col])?;
+            let target = targets.get(&[row, output_col])?;
+            let error = prediction - target;
+            let scaled_error = scale * error;
+            bias_grad[output_col] += scaled_error;
+
+            for input_col in 0..input_size {
+                let feature = features.get(&[row, input_col])?;
+                weight_grad[input_col * output_size + output_col] += feature * scaled_error;
+            }
+        }
+    }
+
+    Ok((
+        Tensor::matrix(input_size, output_size, weight_grad)?,
+        Tensor::vector(bias_grad)?,
+    ))
 }
 
 fn argmax(values: &[f64]) -> usize {
