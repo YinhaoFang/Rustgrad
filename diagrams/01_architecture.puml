@@ -4,6 +4,7 @@ skinparam backgroundColor #FEFEFE
 skinparam packageBackgroundColor #F5F5F5
 skinparam packageBorderColor #333333
 skinparam arrowColor #555555
+skinparam defaultFontName "Microsoft YaHei"
 skinparam defaultFontSize 13
 title RustGrad 分层架构
 

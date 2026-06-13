@@ -1,6 +1,7 @@
 @startuml Data Pipeline
 !theme plain
 skinparam backgroundColor #FEFEFE
+skinparam defaultFontName "Microsoft YaHei"
 skinparam defaultFontSize 13
 title 数据与持久化管线
 

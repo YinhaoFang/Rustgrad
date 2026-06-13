@@ -1,6 +1,7 @@
 @startuml Training Loop
 !theme plain
 skinparam backgroundColor #FEFEFE
+skinparam defaultFontName "Microsoft YaHei"
 skinparam defaultFontSize 13
 title 单 Epoch 训练流程 (以 XOR MLP 为例)
 

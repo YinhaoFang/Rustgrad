@@ -1,6 +1,7 @@
 @startuml Optimizer Hierarchy
 !theme plain
 skinparam backgroundColor #FEFEFE
+skinparam defaultFontName "Segoe UI Symbol"  ' Windows
 skinparam defaultFontSize 13
 title 优化器体系
 

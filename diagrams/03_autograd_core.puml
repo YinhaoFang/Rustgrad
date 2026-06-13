@@ -1,6 +1,7 @@
 @startuml Autograd Core
 !theme plain
 skinparam backgroundColor #FEFEFE
+skinparam defaultFontName "Microsoft YaHei"
 skinparam defaultFontSize 13
 title 自动求导核心类型
 

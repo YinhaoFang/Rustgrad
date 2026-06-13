@@ -1,6 +1,7 @@
 @startuml Backward Flow
 !theme plain
 skinparam backgroundColor #FEFEFE
+skinparam defaultFontName "Microsoft YaHei"
 skinparam defaultFontSize 13
 title 反向传播序列
 

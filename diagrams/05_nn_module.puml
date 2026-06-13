@@ -1,6 +1,7 @@
 @startuml NN Module Hierarchy
 !theme plain
 skinparam backgroundColor #FEFEFE
+skinparam defaultFontName "Microsoft YaHei"
 skinparam defaultFontSize 13
 title 神经网络组件
 
