@@ -150,3 +150,67 @@ fn missing_option_value_exits_with_error_message() {
     assert!(stderr.contains("error: missing value for --epochs"));
     assert!(stderr.contains("run `rustgrad --help` for usage"));
 }
+
+#[test]
+fn save_model_and_load_via_serialize_roundtrips() {
+    let directory = unique_temp_dir("save-load");
+    let model_path = directory.join("model.checkpoint");
+    let model_arg = model_path.to_string_lossy().to_string();
+
+    // Train and save.
+    let stdout = run_success(&[
+        "train-linear",
+        "--epochs",
+        "4",
+        "--save-model",
+        model_arg.as_str(),
+    ]);
+    assert!(stdout.contains("model_saved="));
+    assert!(model_path.exists());
+
+    // Load the checkpoint via the serialize module and verify contents.
+    use rustgrad::serialize::load_linear;
+    let loaded = load_linear(&model_path).expect("load should succeed");
+    assert_eq!(loaded.input_size(), 1);
+    assert_eq!(loaded.output_size(), 1);
+    assert!(loaded.weights().data()[0].is_finite());
+
+    fs::remove_dir_all(directory).expect("cleanup should succeed");
+}
+
+#[test]
+fn save_model_and_load_via_serialize_for_xor_roundtrips() {
+    let directory = unique_temp_dir("save-load-xor");
+    let model_path = directory.join("xor.checkpoint");
+    let model_arg = model_path.to_string_lossy().to_string();
+
+    // Train XOR and save.
+    let stdout = run_success(&[
+        "train-xor",
+        "--epochs",
+        "5",
+        "--save-model",
+        model_arg.as_str(),
+    ]);
+    assert!(stdout.contains("model_saved="));
+    assert!(model_path.exists());
+
+    // Load and verify structure.
+    use rustgrad::serialize::load_xor_mlp;
+    let loaded = load_xor_mlp(&model_path).expect("load should succeed");
+    assert_eq!(loaded.hidden().weights().dims(), &[2, 2]);
+    assert_eq!(loaded.hidden().bias().dims(), &[2]);
+    assert_eq!(loaded.output().weights().dims(), &[2, 1]);
+    assert_eq!(loaded.output().bias().dims(), &[1]);
+
+    fs::remove_dir_all(directory).expect("cleanup should succeed");
+}
+
+#[test]
+fn full_pipeline_help_includes_save_model_flag() {
+    let stdout = run_success(&["--help"]);
+
+    assert!(stdout.contains("--save-model"));
+    assert!(stdout.contains("--format"));
+    assert!(stdout.contains("--output"));
+}
