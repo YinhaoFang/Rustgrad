@@ -147,7 +147,200 @@ impl Dataset {
             )?,
         )
     }
+
+    /// Creates a dataset from CSV text content.
+    ///
+    /// The first line is a header (skipped). Each subsequent line must contain
+    /// the feature columns followed by target columns, comma-separated.
+    /// `num_features` determines the split: the first `num_features` columns
+    /// are features, the rest are targets.
+    pub fn from_csv(
+        name: impl Into<String>,
+        csv_text: &str,
+        num_features: usize,
+    ) -> Result<Self> {
+        if num_features == 0 {
+            return Err(RustGradError::InvalidArgument {
+                name: "num_features",
+                reason: "num_features must be greater than zero".to_string(),
+            });
+        }
+
+        let mut rows: Vec<Vec<f64>> = Vec::new();
+        let mut header_skipped = false;
+        for (line_idx, line) in csv_text.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            // Skip the first non-comment, non-empty line as header.
+            if !header_skipped {
+                header_skipped = true;
+                continue;
+            }
+
+            let values: Vec<f64> = line
+                .split(',')
+                .map(|s| {
+                    s.trim().parse::<f64>().map_err(|_| {
+                        RustGradError::InvalidArgument {
+                            name: "csv",
+                            reason: format!("invalid float in line {}: '{s}'", line_idx + 1),
+                        }
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            if values.is_empty() {
+                continue;
+            }
+
+            let expected_cols = num_features + 1; // at least one target column
+            if values.len() < expected_cols {
+                return Err(RustGradError::InvalidArgument {
+                    name: "csv",
+                    reason: format!(
+                        "line {} has {} columns, expected at least {expected_cols}",
+                        line_idx + 1,
+                        values.len()
+                    ),
+                });
+            }
+
+            rows.push(values);
+        }
+
+        if rows.is_empty() {
+            return Err(RustGradError::InvalidArgument {
+                name: "csv",
+                reason: "no data rows found".to_string(),
+            });
+        }
+
+        let num_rows = rows.len();
+        let num_targets = rows[0].len() - num_features;
+        let mut features = Vec::with_capacity(num_rows * num_features);
+        let mut targets = Vec::with_capacity(num_rows * num_targets);
+
+        for row in &rows {
+            features.extend_from_slice(&row[..num_features]);
+            targets.extend_from_slice(&row[num_features..]);
+        }
+
+        Dataset::new(
+            name,
+            Tensor::matrix(num_rows, num_features, features)?,
+            Tensor::matrix(num_rows, num_targets, targets)?,
+        )
+    }
+
+    /// Returns an iterator over (features_row, targets_row) pairs.
+    pub fn iter_rows(&self) -> DatasetRowIterator<'_> {
+        DatasetRowIterator {
+            dataset: self,
+            index: 0,
+        }
+    }
+
+    /// Returns a new dataset with rows deterministically shuffled.
+    ///
+    /// Uses a simple linear congruential generator seeded by `seed`. Same seed
+    /// always produces the same permutation.
+    pub fn shuffle(&self, seed: u64) -> Result<Self> {
+        let n = self.len();
+        if n <= 1 {
+            return Ok(self.clone());
+        }
+
+        let mut indices: Vec<usize> = (0..n).collect();
+        // Fisher-Yates shuffle with LCG.
+        let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        for i in (1..n).rev() {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let j = (state >> 33) as usize % (i + 1);
+            indices.swap(i, j);
+        }
+
+        let feature_cols = self.input_size();
+        let target_cols = self.target_size();
+        let mut features = Vec::with_capacity(n * feature_cols);
+        let mut targets = Vec::with_capacity(n * target_cols);
+
+        for &row_idx in &indices {
+            let f_start = row_idx * feature_cols;
+            let f_end = f_start + feature_cols;
+            features.extend_from_slice(&self.features.data()[f_start..f_end]);
+
+            let t_start = row_idx * target_cols;
+            let t_end = t_start + target_cols;
+            targets.extend_from_slice(&self.targets.data()[t_start..t_end]);
+        }
+
+        Dataset::new(
+            format!("{}_shuffled", self.name),
+            Tensor::matrix(n, feature_cols, features)?,
+            Tensor::matrix(n, target_cols, targets)?,
+        )
+    }
+
+    /// Splits the dataset into training and test subsets.
+    ///
+    /// `ratio` is the fraction allocated to training (e.g., 0.8 for 80/20 split).
+    pub fn split(&self, ratio: f64) -> Result<(Dataset, Dataset)> {
+        if ratio <= 0.0 || ratio >= 1.0 || !ratio.is_finite() {
+            return Err(RustGradError::InvalidArgument {
+                name: "ratio",
+                reason: "ratio must be finite and in (0, 1)".to_string(),
+            });
+        }
+
+        let n = self.len();
+        let train_rows = (n as f64 * ratio).ceil() as usize;
+        if train_rows == 0 || train_rows >= n {
+            return Err(RustGradError::InvalidArgument {
+                name: "ratio",
+                reason: format!(
+                    "split ratio {ratio} produces empty subset (n={n}, train={train_rows})"
+                ),
+            });
+        }
+
+        let train = self.batch(0, train_rows)?;
+        let test = self.batch(train_rows, n - train_rows)?;
+
+        Ok((
+            Dataset::new(format!("{}_train", self.name), train.features().clone(), train.targets().clone())?,
+            Dataset::new(format!("{}_test", self.name), test.features().clone(), test.targets().clone())?,
+        ))
+    }
 }
+
+/// Row-wise iterator over a dataset.
+pub struct DatasetRowIterator<'a> {
+    dataset: &'a Dataset,
+    index: usize,
+}
+
+impl<'a> Iterator for DatasetRowIterator<'a> {
+    type Item = crate::Result<(Tensor, Tensor)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index >= self.dataset.len() {
+            return None;
+        }
+        let result = self.dataset.sample(self.index);
+        self.index += 1;
+        Some(result)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.dataset.len() - self.index;
+        (remaining, Some(remaining))
+    }
+}
+
+impl<'a> ExactSizeIterator for DatasetRowIterator<'a> {}
 
 /// Creates a deterministic one-dimensional linear regression dataset.
 ///
@@ -628,5 +821,132 @@ mod tests {
                 reason: "class index 3 is out of range for 3 classes".to_string(),
             }
         );
+    }
+
+    // ── CSV, iterator, shuffle, split ────────────────────────────────
+
+    #[test]
+    fn from_csv_parses_header_and_data() {
+        let csv = "x,y,target\n1.0,2.0,10.0\n3.0,4.0,20.0\n";
+        let dataset = Dataset::from_csv("csv-test", csv, 2).expect("valid csv");
+
+        assert_eq!(dataset.name(), "csv-test");
+        assert_eq!(dataset.len(), 2);
+        assert_eq!(dataset.input_size(), 2);
+        assert_eq!(dataset.target_size(), 1);
+        assert_eq!(dataset.features().data(), &[1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(dataset.targets().data(), &[10.0, 20.0]);
+    }
+
+    #[test]
+    fn from_csv_skips_comment_and_empty_lines() {
+        let csv = "# comment\nx,y,t\n1.0,2.0,3.0\n\n4.0,5.0,6.0\n";
+        let dataset = Dataset::from_csv("csv-test", csv, 2).expect("valid csv");
+        assert_eq!(dataset.len(), 2);
+        assert_eq!(dataset.features().data(), &[1.0, 2.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn from_csv_rejects_insufficient_columns() {
+        let csv = "x,t\n1.0,2.0\n3.0\n";
+        let error = Dataset::from_csv("bad", csv, 1).expect_err("short line");
+        assert!(error.to_string().contains("has 1 columns"));
+    }
+
+    #[test]
+    fn from_csv_rejects_invalid_float() {
+        let csv = "x,t\nabc,1.0\n";
+        let error = Dataset::from_csv("bad", csv, 1).expect_err("bad float");
+        assert!(error.to_string().contains("invalid float"));
+    }
+
+    #[test]
+    fn from_csv_rejects_empty_data() {
+        let csv = "x,t\n";
+        let error = Dataset::from_csv("empty", csv, 1).expect_err("no data");
+        assert!(error.to_string().contains("no data rows found"));
+    }
+
+    #[test]
+    fn iter_rows_yields_all_samples() {
+        let dataset = xor().expect("valid xor");
+        let mut count = 0;
+        for item in dataset.iter_rows() {
+            let (_features, _targets) = item.expect("valid row");
+            count += 1;
+        }
+        assert_eq!(count, 4);
+    }
+
+    #[test]
+    fn iter_rows_is_exact_size() {
+        let dataset = xor().expect("valid xor");
+        let iter = dataset.iter_rows();
+        assert_eq!(iter.len(), 4);
+    }
+
+    #[test]
+    fn shuffle_preserves_all_rows() {
+        let dataset = xor().expect("valid xor");
+        let shuffled = dataset.shuffle(42).expect("shuffle succeeds");
+
+        assert_eq!(shuffled.len(), dataset.len());
+        assert_eq!(shuffled.input_size(), dataset.input_size());
+        assert_eq!(shuffled.target_size(), dataset.target_size());
+    }
+
+    #[test]
+    fn shuffle_is_deterministic() {
+        let dataset = linear_regression(5, 2.0, 1.0).expect("valid");
+        let a = dataset.shuffle(123).expect("shuffle");
+        let b = dataset.shuffle(123).expect("shuffle");
+        assert_eq!(a.features().data(), b.features().data());
+        assert_eq!(a.targets().data(), b.targets().data());
+    }
+
+    #[test]
+    fn shuffle_different_seeds_differ() {
+        let dataset = linear_regression(20, 2.0, 1.0).expect("valid");
+        let a = dataset.shuffle(111).expect("shuffle");
+        let b = dataset.shuffle(222).expect("shuffle");
+        assert_ne!(a.features().data(), b.features().data());
+    }
+
+    #[test]
+    fn shuffle_handles_single_row() {
+        let dataset = linear_regression(1, 1.0, 0.0).expect("valid");
+        let shuffled = dataset.shuffle(0).expect("shuffle");
+        assert_eq!(shuffled.features().data(), dataset.features().data());
+    }
+
+    #[test]
+    fn split_eighty_twenty() {
+        let dataset = linear_regression(10, 2.0, 0.0).expect("valid");
+        let (train, test) = dataset.split(0.8).expect("split should succeed");
+
+        assert_eq!(train.len(), 8);
+        assert_eq!(test.len(), 2);
+    }
+
+    #[test]
+    fn split_handles_minority() {
+        let dataset = linear_regression(5, 1.0, 0.0).expect("valid");
+        let (train, test) = dataset.split(0.3).expect("split");
+
+        assert_eq!(train.len(), 2);
+        assert_eq!(test.len(), 3);
+    }
+
+    #[test]
+    fn split_rejects_invalid_ratio() {
+        let dataset = xor().expect("valid");
+        let e0 = dataset.split(0.0).expect_err("zero ratio");
+        assert!(e0.to_string().contains("ratio must be finite and in (0, 1)"));
+
+        let e1 = dataset.split(1.0).expect_err("one ratio");
+        assert!(e1.to_string().contains("ratio must be finite and in (0, 1)"));
+
+        let enan = dataset.split(f64::NAN).expect_err("nan ratio");
+        assert!(enan.to_string().contains("ratio must be finite and in (0, 1)"));
     }
 }
