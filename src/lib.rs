@@ -10,6 +10,7 @@ pub mod loss;
 pub mod nn;
 pub mod optim;
 pub mod report;
+pub mod serialize;
 pub mod tensor;
 pub mod train;
 

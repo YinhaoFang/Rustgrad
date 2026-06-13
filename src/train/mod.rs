@@ -305,6 +305,22 @@ impl XorMlp {
         })
     }
 
+    /// Creates an XOR MLP from explicit weight and bias tensors.
+    pub fn from_parameters(
+        hidden_weights: Tensor,
+        hidden_bias: Tensor,
+        output_weights: Tensor,
+        output_bias: Tensor,
+        threshold: f64,
+    ) -> Result<Self> {
+        validate_finite("threshold", threshold)?;
+        Ok(Self {
+            hidden: Linear::with_parameters(hidden_weights, hidden_bias)?,
+            output: Linear::with_parameters(output_weights, output_bias)?,
+            threshold,
+        })
+    }
+
     /// Returns the hidden linear layer.
     #[must_use]
     pub fn hidden(&self) -> &Linear {
