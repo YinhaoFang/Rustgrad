@@ -5,7 +5,7 @@ use crate::{Result, RustGradError};
 
 /// Immutable gradients aligned with a model's trainable parameters.
 ///
-/// RustGrad keeps gradients outside `Tensor` for the first teaching version so
+/// RustGrad keeps gradients outside `Tensor` for the first course-project version so
 /// optimizers can be demonstrated independently from the computation graph.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct GradientSet {

@@ -7,7 +7,7 @@ use crate::{Result, RustGradError};
 ///
 /// Features and targets are stored as row-major matrices. Each row represents
 /// one sample, which keeps batching and reporting simple for the first
-/// teaching version of RustGrad.
+/// course-project version of RustGrad.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Dataset {
     name: String,

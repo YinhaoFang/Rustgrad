@@ -2,6 +2,8 @@
 
 use crate::train::{TrainingHistory, TrainingRecord};
 use crate::{Result, RustGradError};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 /// Summary statistics derived from a training history.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -76,6 +78,44 @@ impl TrainingSummary {
     }
 }
 
+/// Paths written by a report export operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportBundle {
+    directory: PathBuf,
+    markdown_path: PathBuf,
+    csv_path: PathBuf,
+}
+
+impl ReportBundle {
+    /// Creates a report bundle path record.
+    #[must_use]
+    pub fn new(directory: PathBuf, markdown_path: PathBuf, csv_path: PathBuf) -> Self {
+        Self {
+            directory,
+            markdown_path,
+            csv_path,
+        }
+    }
+
+    /// Returns the directory containing the exported files.
+    #[must_use]
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
+
+    /// Returns the Markdown summary path.
+    #[must_use]
+    pub fn markdown_path(&self) -> &Path {
+        &self.markdown_path
+    }
+
+    /// Returns the CSV history path.
+    #[must_use]
+    pub fn csv_path(&self) -> &Path {
+        &self.csv_path
+    }
+}
+
 /// Formats a compact Markdown summary for reports.
 pub fn history_to_markdown(title: &str, history: &TrainingHistory) -> Result<String> {
     validate_title(title)?;
@@ -138,6 +178,35 @@ pub fn history_to_csv(history: &TrainingHistory) -> Result<String> {
     Ok(output)
 }
 
+/// Writes Markdown and CSV report files into a directory.
+///
+/// The function creates the directory if needed and writes stable filenames:
+/// `summary.md` for the human-readable report and `history.csv` for plotting.
+pub fn write_history_bundle(
+    directory: impl AsRef<Path>,
+    title: &str,
+    history: &TrainingHistory,
+) -> Result<ReportBundle> {
+    validate_title(title)?;
+    ensure_non_empty(history)?;
+
+    let directory = directory.as_ref();
+    fs::create_dir_all(directory).map_err(|error| io_error("directory", directory, error))?;
+
+    let markdown_path = directory.join("summary.md");
+    let csv_path = directory.join("history.csv");
+    fs::write(&markdown_path, history_to_markdown(title, history)?)
+        .map_err(|error| io_error("markdown_path", &markdown_path, error))?;
+    fs::write(&csv_path, history_to_csv(history)?)
+        .map_err(|error| io_error("csv_path", &csv_path, error))?;
+
+    Ok(ReportBundle::new(
+        directory.to_path_buf(),
+        markdown_path,
+        csv_path,
+    ))
+}
+
 /// Formats one progress line for terminal output.
 #[must_use]
 pub fn format_progress(record: &TrainingRecord) -> String {
@@ -167,6 +236,13 @@ fn ensure_non_empty(history: &TrainingHistory) -> Result<()> {
     }
 }
 
+fn io_error(name: &'static str, path: &Path, error: std::io::Error) -> RustGradError {
+    RustGradError::InvalidArgument {
+        name,
+        reason: format!("failed to write {}: {error}", path.display()),
+    }
+}
+
 fn validate_title(title: &str) -> Result<()> {
     if title.trim().is_empty() {
         Err(RustGradError::InvalidArgument {
@@ -188,9 +264,14 @@ fn format_metric(value: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_progress, history_to_csv, history_to_markdown, TrainingSummary};
+    use super::{
+        format_progress, history_to_csv, history_to_markdown, write_history_bundle, TrainingSummary,
+    };
     use crate::train::{TrainingHistory, TrainingRecord};
     use crate::RustGradError;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     const EPSILON: f64 = 1e-12;
 
@@ -207,6 +288,14 @@ mod tests {
             (actual - expected).abs() < EPSILON,
             "expected {expected}, got {actual}"
         );
+    }
+
+    fn unique_temp_dir(name: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("rustgrad-report-{name}-{suffix}"))
     }
 
     #[test]
@@ -346,6 +435,50 @@ mod tests {
     #[test]
     fn csv_report_rejects_empty_history() {
         let error = history_to_csv(&TrainingHistory::new()).expect_err("empty history should fail");
+
+        assert_eq!(
+            error,
+            RustGradError::InvalidArgument {
+                name: "history",
+                reason: "training history must not be empty".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn write_history_bundle_creates_markdown_and_csv_files() {
+        let directory = unique_temp_dir("bundle");
+        let history = sample_history();
+
+        let bundle =
+            write_history_bundle(&directory, "Training export", &history).expect("write succeeds");
+
+        assert_eq!(bundle.directory(), directory.as_path());
+        assert_eq!(
+            bundle.markdown_path(),
+            directory.join("summary.md").as_path()
+        );
+        assert_eq!(bundle.csv_path(), directory.join("history.csv").as_path());
+
+        let markdown = fs::read_to_string(bundle.markdown_path()).expect("markdown exists");
+        let csv = fs::read_to_string(bundle.csv_path()).expect("csv exists");
+
+        assert!(markdown.starts_with("# Training export"));
+        assert!(markdown.contains("- Best accuracy: 0.875000"));
+        assert_eq!(
+            csv,
+            "epoch,loss,accuracy\n1,2.000000,0.250000\n2,1.250000,0.500000\n3,0.750000,0.875000\n"
+        );
+
+        fs::remove_dir_all(directory).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn write_history_bundle_rejects_empty_history() {
+        let directory = unique_temp_dir("empty");
+
+        let error = write_history_bundle(&directory, "Empty", &TrainingHistory::new())
+            .expect_err("empty history should fail");
 
         assert_eq!(
             error,

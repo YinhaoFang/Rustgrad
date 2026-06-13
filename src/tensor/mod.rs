@@ -139,9 +139,8 @@ impl From<Shape> for Vec<usize> {
 
 /// Dense tensor storage used by RustGrad operations.
 ///
-/// Values are stored in row-major order. Computation graph metadata will be
-/// added by the autograd module later; this type only owns numeric data and
-/// shape information.
+/// Values are stored in row-major order. Computation graph metadata lives in
+/// the autograd module; this type only owns numeric data and shape information.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tensor {
     shape: Shape,

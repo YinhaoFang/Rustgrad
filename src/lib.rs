@@ -1,4 +1,4 @@
-//! RustGrad is a teaching-oriented deep learning framework.
+//! RustGrad is a Rust course project that implements core deep learning pieces.
 //!
 //! The crate will provide tensors, automatic differentiation,
 //! neural network layers, losses, optimizers, and small training examples.

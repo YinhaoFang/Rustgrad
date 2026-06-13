@@ -1,56 +1,128 @@
 # RustGrad
 
-RustGrad is a teaching-oriented deep learning framework written in Rust. It is
-designed for learning how tensor operations, automatic differentiation, neural
-network layers, losses, optimizers, and training loops fit together inside a
-small but complete framework.
+RustGrad is a Rust course project that implements the core pieces of a small
+deep learning framework. It is designed to show how tensor operations,
+automatic differentiation, neural network layers, losses, optimizers, datasets,
+training loops, and experiment reports fit together inside one inspectable
+project.
 
-The project is intentionally not a wrapper around an existing deep learning
-library. Core tensor operations, gradient propagation, model layers, and
-optimizers are implemented in this repository so the design can be inspected,
-tested, and explained clearly.
+The project is not a wrapper around an existing deep learning framework. Core
+tensor operations, gradient propagation, model layers, optimizers, training
+loops, and CLI examples are implemented in this repository so the design can be
+inspected, tested, and explained clearly in a course report.
 
-## Goals
+## Implemented Features
 
-- Provide a compact `Tensor` type for one-dimensional and two-dimensional data.
-- Implement common tensor operations such as elementwise arithmetic, matrix
-  multiplication, transpose, sum, and mean.
-- Build a dynamic automatic differentiation engine with `backward()` and
-  gradient storage.
-- Provide basic neural network building blocks: activations, linear layers, and
-  sequential models.
-- Implement supervised learning losses and optimizers.
-- Include small training examples for linear regression, XOR classification, and
-  spiral classification.
-- Export training logs that can be used in experiment reports.
-
-## Planned Features
-
-The project will be developed in small, reviewable commits.
-
-| Area | Planned functionality |
+| Area | Functionality |
 | --- | --- |
-| Tensor | Shape validation, indexing, reshape, arithmetic, reductions, matmul |
-| Autograd | Computation graph nodes, backward traversal, gradient accumulation |
-| Neural networks | ReLU, Sigmoid, Tanh, Softmax, Linear, Sequential |
+| Tensor | Shape validation, indexing, reshape, arithmetic, reductions, transpose, matrix multiplication |
+| Autograd | Computation graph nodes, dependency ordering, backward traversal, gradient accumulation |
+| Neural networks | `Linear`, `Sequential`, ReLU, Sigmoid, Tanh, Softmax |
 | Losses | Mean squared error and cross entropy |
 | Optimizers | SGD, Momentum, Adam |
-| Training | Reusable loops, metrics, deterministic synthetic datasets |
+| Data | Deterministic linear regression, XOR, and spiral datasets |
+| Training | Reusable training configs, metrics, histories, and convergence examples |
 | CLI | `train-linear`, `train-xor`, `train-spiral`, `inspect` |
-| Reports | CSV and Markdown loss summaries |
+| Reports | Markdown summaries and CSV loss curves through `--output DIR` |
+| Quality | Unit tests, CLI integration tests, formatting, Clippy, and GitHub Actions CI |
 
-## Example CLI
-
-The final command-line interface is planned to look like this:
+## Project Structure
 
 ```text
-rustgrad train-linear --epochs 200 --learning-rate 0.05
-rustgrad train-xor --epochs 1000 --hidden-size 8
-rustgrad train-spiral --epochs 500 --classes 3
-rustgrad inspect runs/latest
+src/
+  autograd/   dynamic computation graph and backward rules
+  data/       synthetic datasets used by examples and tests
+  loss/       MSE and cross entropy losses
+  nn/         layers, activations, and module abstractions
+  optim/      SGD, Momentum, and Adam optimizers
+  report/     Markdown and CSV training report export
+  tensor/     dense tensor shape, indexing, math, and reductions
+  train/      training loops and metrics
+  main.rs     command-line interface
+tests/
+  cli.rs      end-to-end CLI integration tests
 ```
 
-These commands will be added as the framework grows.
+## Documentation
+
+- [Autograd design](docs/autograd.md): computation graph, backward propagation,
+  gradient accumulation, and shape handling.
+- [Training workflow](docs/training.md): datasets, training loops, optimizer
+  flow, CLI examples, and report export.
+- [Testing strategy](docs/testing.md): unit tests, CLI tests, integration
+  coverage, reproducibility, and Windows notes.
+- [Technical report](docs/experiment-report.md): bilingual course report that
+  connects the architecture, implementation, validation, and limits.
+- [Changelog](CHANGELOG.md): project milestone summary and known limits.
+
+## Quick Start
+
+Build and run the tests:
+
+```bash
+cargo build
+cargo test
+```
+
+Run a linear regression example:
+
+```bash
+cargo run -- train-linear --epochs 120 --learning-rate 0.12 --samples 31
+```
+
+Run the XOR MLP example:
+
+```bash
+cargo run -- train-xor --epochs 160 --learning-rate 0.4
+```
+
+Run the spiral softmax classifier and export report files:
+
+```bash
+cargo run -- train-spiral --epochs 160 --learning-rate 0.7 --samples-per-class 12 --classes 3 --output runs/spiral-demo
+```
+
+The `--output` directory receives:
+
+- `summary.md`: Markdown summary with training metrics and history table.
+- `history.csv`: CSV loss and accuracy curve for plotting or reports.
+
+Inspect a compact snapshot of trained example models:
+
+```bash
+cargo run -- inspect
+```
+
+## CLI Reference
+
+```text
+rustgrad train-linear [--epochs N] [--learning-rate LR] [--samples N] [--slope V] [--intercept V] [--format text|csv|markdown] [--output DIR]
+rustgrad train-xor [--epochs N] [--learning-rate LR] [--format text|csv|markdown] [--output DIR]
+rustgrad train-spiral [--epochs N] [--learning-rate LR] [--samples-per-class N] [--classes N] [--format text|csv|markdown] [--output DIR]
+rustgrad inspect
+rustgrad --version
+```
+
+Output formats:
+
+- `text`: human-readable summary plus useful predictions or parameter details.
+- `csv`: machine-readable training history.
+- `markdown` or `md`: report-ready Markdown.
+
+## Example Output
+
+```text
+XOR MLP training
+epochs=5
+initial_loss=0.242958
+final_loss=0.232110
+best_loss=0.232110
+loss_improvement=0.010848
+best_accuracy=1.000000
+last=epoch=5 loss=0.232110 accuracy=1.000000
+probabilities=[0.205530]; [0.791871]; [0.791871]; [0.206772]
+classes=[0.000000]; [1.000000]; [1.000000]; [0.000000]
+```
 
 ## Development
 
@@ -62,23 +134,25 @@ cargo test
 cargo clippy -- -D warnings
 ```
 
-The repository also contains a GitHub Actions workflow that runs formatting,
-build, tests, and Clippy checks on push and pull request events.
+The repository includes a GitHub Actions workflow that runs formatting, build,
+tests, and Clippy checks on push and pull request events.
+
+This project works directly on Windows with stable Rust and Cargo. WSL2 is not
+required for the current CPU-only implementation.
 
 ## Experiment Scoring Alignment
 
-This project is structured to match the Rust course experiment requirements:
-
 - **Code scale and complexity:** the framework is split into tensor, autograd,
-  neural network, optimizer, data, training, and report modules.
-- **Testing and quality:** core behavior will be covered by unit and integration
-  tests, including normal paths, boundary cases, and error handling.
-- **Engineering standards:** CI, conventional commits, documentation, and a
-  changelog are planned from the beginning.
-- **Project acceptance:** training examples will demonstrate that the framework
-  can fit simple datasets and produce reproducible results.
-- **Experiment report:** generated logs and documentation will support a clear
-  GitHub Issue report.
+  neural network, optimizer, data, training, report, and CLI modules.
+- **Testing and quality:** the project includes broad unit coverage plus
+  end-to-end CLI integration tests for success and error cases.
+- **Engineering standards:** CI, conventional commit-friendly history, clear
+  module boundaries, and report export are part of the repository.
+- **Project acceptance:** examples show linear regression fitting, XOR
+  classification, and non-linear spiral classification through a softmax
+  classifier with feature mapping.
+- **Experiment report:** `--output DIR` generates Markdown and CSV artifacts
+  that can be attached to or copied into the final course report.
 
 ## License
 
