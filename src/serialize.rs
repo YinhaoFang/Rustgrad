@@ -34,10 +34,12 @@ pub fn write_tensor(tensor: &Tensor, output: &mut String) {
 ///
 /// Returns the tensor and the number of bytes consumed.
 pub fn read_tensor(input: &str) -> Result<(Tensor, usize)> {
-    let header_end = input.find('\n').ok_or_else(|| RustGradError::InvalidArgument {
-        name: "checkpoint",
-        reason: "missing tensor header line".to_string(),
-    })?;
+    let header_end = input
+        .find('\n')
+        .ok_or_else(|| RustGradError::InvalidArgument {
+            name: "checkpoint",
+            reason: "missing tensor header line".to_string(),
+        })?;
     let header = &input[..header_end];
     let dims: Vec<usize> = header
         .split(',')
@@ -58,17 +60,21 @@ pub fn read_tensor(input: &str) -> Result<(Tensor, usize)> {
     let mut cursor = header_end + 1;
 
     for _ in 0..element_count {
-        let line_end = input[cursor..]
-            .find('\n')
-            .ok_or_else(|| RustGradError::InvalidArgument {
-                name: "checkpoint",
-                reason: format!("expected {element_count} values, found {}", data.len()),
-            })?;
+        let line_end =
+            input[cursor..]
+                .find('\n')
+                .ok_or_else(|| RustGradError::InvalidArgument {
+                    name: "checkpoint",
+                    reason: format!("expected {element_count} values, found {}", data.len()),
+                })?;
         let line = &input[cursor..cursor + line_end];
-        let value: f64 = line.trim().parse().map_err(|_| RustGradError::InvalidArgument {
-            name: "checkpoint",
-            reason: format!("invalid float '{line}'"),
-        })?;
+        let value: f64 = line
+            .trim()
+            .parse()
+            .map_err(|_| RustGradError::InvalidArgument {
+                name: "checkpoint",
+                reason: format!("invalid float '{line}'"),
+            })?;
         data.push(value);
         cursor += line_end + 1;
     }
@@ -198,8 +204,8 @@ mod tests {
 
     #[test]
     fn roundtrip_tensor_preserves_values() {
-        let original = Tensor::matrix(3, 2, vec![1.0, 2.0, -3.5, 0.125, 1e-10, 0.0])
-            .expect("valid matrix");
+        let original =
+            Tensor::matrix(3, 2, vec![1.0, 2.0, -3.5, 0.125, 1e-10, 0.0]).expect("valid matrix");
         let mut text = String::new();
         write_tensor(&original, &mut text);
 
@@ -211,7 +217,8 @@ mod tests {
 
     #[test]
     fn roundtrip_vector_tensor_preserves_values() {
-        let original = Tensor::vector(vec![0.0, std::f64::consts::PI, -std::f64::consts::E]).expect("valid");
+        let original =
+            Tensor::vector(vec![0.0, std::f64::consts::PI, -std::f64::consts::E]).expect("valid");
         let mut text = String::new();
         write_tensor(&original, &mut text);
 

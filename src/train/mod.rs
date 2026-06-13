@@ -477,14 +477,14 @@ pub fn train_linear_regression(
 
             // predictions = features @ weights
             let matmul_val = features.matmul(trainable[0])?;
-            let matmul_node = graph.add_operation(
-                Operation::MatMul,
-                vec![f_node, w_node],
-                matmul_val,
-                true,
-            )?;
+            let matmul_node =
+                graph.add_operation(Operation::MatMul, vec![f_node, w_node], matmul_val, true)?;
             // predictions = matmul + bias (row_add)
-            let pred_val = graph.node(matmul_node).expect("exists").value().row_add(trainable[1])?;
+            let pred_val = graph
+                .node(matmul_node)
+                .expect("exists")
+                .value()
+                .row_add(trainable[1])?;
             let n = pred_val.len() as f64;
             let pred_shape = pred_val.shape().to_vec();
             let pred_data = pred_val.data().to_vec();
@@ -550,18 +550,34 @@ pub fn train_binary_classification(
             let b_node = graph.add_leaf(trainable[1].clone(), true);
 
             let matmul_val = features.matmul(trainable[0])?;
-            let matmul_node = graph.add_operation(
-                Operation::MatMul, vec![f_node, w_node], matmul_val, true,
-            )?;
-            let logits_val = graph.node(matmul_node).expect("exists").value().row_add(trainable[1])?;
+            let matmul_node =
+                graph.add_operation(Operation::MatMul, vec![f_node, w_node], matmul_val, true)?;
+            let logits_val = graph
+                .node(matmul_node)
+                .expect("exists")
+                .value()
+                .row_add(trainable[1])?;
             let n = logits_val.len() as f64;
             let logits_node = graph.add_operation(
-                Operation::RowAdd, vec![matmul_node, b_node], logits_val, true,
+                Operation::RowAdd,
+                vec![matmul_node, b_node],
+                logits_val,
+                true,
             )?;
 
             // sigmoid + BCE combined: dL/dlogits = (sigma(logits) - t) / N
-            let logits_data = graph.node(logits_node).expect("exists").value().data().to_vec();
-            let logits_shape = graph.node(logits_node).expect("exists").value().shape().to_vec();
+            let logits_data = graph
+                .node(logits_node)
+                .expect("exists")
+                .value()
+                .data()
+                .to_vec();
+            let logits_shape = graph
+                .node(logits_node)
+                .expect("exists")
+                .value()
+                .shape()
+                .to_vec();
             let scale = 1.0 / n;
             let init_grad_data: Vec<f64> = logits_data
                 .iter()
@@ -611,40 +627,66 @@ pub fn train_xor_mlp(config: TrainingConfig) -> Result<XorTrainingResult> {
             // Collect trainable parameters in order.
             let hidden_params = model.hidden().parameters();
             let output_params = model.output().parameters();
-            let params: Vec<&Tensor> = hidden_params.iter()
-                .chain(output_params.iter()).copied().collect();
+            let params: Vec<&Tensor> = hidden_params
+                .iter()
+                .chain(output_params.iter())
+                .copied()
+                .collect();
 
             let f_node = graph.add_leaf(features.clone(), false);
-            let hw_node = graph.add_leaf(params[0].clone(), true);  // hidden weights
-            let hb_node = graph.add_leaf(params[1].clone(), true);  // hidden bias
-            let ow_node = graph.add_leaf(params[2].clone(), true);  // output weights
-            let ob_node = graph.add_leaf(params[3].clone(), true);  // output bias
+            let hw_node = graph.add_leaf(params[0].clone(), true); // hidden weights
+            let hb_node = graph.add_leaf(params[1].clone(), true); // hidden bias
+            let ow_node = graph.add_leaf(params[2].clone(), true); // output weights
+            let ob_node = graph.add_leaf(params[3].clone(), true); // output bias
 
             // Hidden: matmul -> row_add -> sigmoid
             let h_matmul_val = features.matmul(params[0])?;
             let h_matmul = graph.add_operation(
-                Operation::MatMul, vec![f_node, hw_node], h_matmul_val, true,
+                Operation::MatMul,
+                vec![f_node, hw_node],
+                h_matmul_val,
+                true,
             )?;
-            let h_biased_val = graph.node(h_matmul).expect("exists").value().row_add(params[1])?;
+            let h_biased_val = graph
+                .node(h_matmul)
+                .expect("exists")
+                .value()
+                .row_add(params[1])?;
             let h_biased = graph.add_operation(
-                Operation::RowAdd, vec![h_matmul, hb_node], h_biased_val, true,
+                Operation::RowAdd,
+                vec![h_matmul, hb_node],
+                h_biased_val,
+                true,
             )?;
             let hidden_val = sigmoid(graph.node(h_biased).expect("exists").value())?;
-            let hidden_node = graph.add_operation(
-                Operation::Sigmoid, vec![h_biased], hidden_val, true,
-            )?;
+            let hidden_node =
+                graph.add_operation(Operation::Sigmoid, vec![h_biased], hidden_val, true)?;
 
             // Output: matmul -> row_add (logits, then sigmoid manually)
-            let o_matmul_val = graph.node(hidden_node).expect("exists").value().matmul(params[2])?;
+            let o_matmul_val = graph
+                .node(hidden_node)
+                .expect("exists")
+                .value()
+                .matmul(params[2])?;
             let o_matmul = graph.add_operation(
-                Operation::MatMul, vec![hidden_node, ow_node], o_matmul_val, true,
+                Operation::MatMul,
+                vec![hidden_node, ow_node],
+                o_matmul_val,
+                true,
             )?;
-            let logits_val = graph.node(o_matmul).expect("exists").value().row_add(params[3])?;
+            let logits_val = graph
+                .node(o_matmul)
+                .expect("exists")
+                .value()
+                .row_add(params[3])?;
             let n = logits_val.len() as f64;
             let logits_shape = logits_val.shape().to_vec();
             let logits_data = logits_val.data().to_vec();
             let logits_node = graph.add_operation(
-                Operation::RowAdd, vec![o_matmul, ob_node], logits_val, true,
+                Operation::RowAdd,
+                vec![o_matmul, ob_node],
+                logits_val,
+                true,
             )?;
 
             // sigmoid + BCE combined: dL/dlogits = (sigma(logits) - t) / N
@@ -710,14 +752,20 @@ pub fn train_spiral_classifier(
             let b_node = graph.add_leaf(trainable[1].clone(), true);
 
             let matmul_val = features.matmul(trainable[0])?;
-            let matmul_node = graph.add_operation(
-                Operation::MatMul, vec![f_node, w_node], matmul_val, true,
-            )?;
-            let logits_val = graph.node(matmul_node).expect("exists").value().row_add(trainable[1])?;
+            let matmul_node =
+                graph.add_operation(Operation::MatMul, vec![f_node, w_node], matmul_val, true)?;
+            let logits_val = graph
+                .node(matmul_node)
+                .expect("exists")
+                .value()
+                .row_add(trainable[1])?;
             let n = logits_val.rows().expect("matrix rows") as f64;
             let logits_shape = logits_val.shape().to_vec();
             let logits_node = graph.add_operation(
-                Operation::RowAdd, vec![matmul_node, b_node], logits_val, true,
+                Operation::RowAdd,
+                vec![matmul_node, b_node],
+                logits_val,
+                true,
             )?;
 
             // softmax + CE combined: dL/dlogits = (softmax(logits) - targets) / N
@@ -744,9 +792,7 @@ pub fn train_spiral_classifier(
 
         let updated_logits = model.forward(features)?;
         let updated_probabilities = softmax(&updated_logits)?;
-        let epoch_loss = loss
-            .forward(&updated_logits, targets)?
-            .get_flat(0)?;
+        let epoch_loss = loss.forward(&updated_logits, targets)?.get_flat(0)?;
         let accuracy = categorical_accuracy(&updated_probabilities, targets)?;
         history.push(TrainingRecord::new(epoch, epoch_loss, Some(accuracy))?);
     }
@@ -884,7 +930,6 @@ fn probabilities_to_one_hot(probabilities: &Tensor) -> Result<Tensor> {
 
     Tensor::matrix(rows, cols, data)
 }
-
 
 fn spiral_feature_map(features: &Tensor) -> Result<Tensor> {
     validate_rank_two("features", features)?;

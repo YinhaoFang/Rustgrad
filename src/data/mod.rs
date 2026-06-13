@@ -154,11 +154,7 @@ impl Dataset {
     /// the feature columns followed by target columns, comma-separated.
     /// `num_features` determines the split: the first `num_features` columns
     /// are features, the rest are targets.
-    pub fn from_csv(
-        name: impl Into<String>,
-        csv_text: &str,
-        num_features: usize,
-    ) -> Result<Self> {
+    pub fn from_csv(name: impl Into<String>, csv_text: &str, num_features: usize) -> Result<Self> {
         if num_features == 0 {
             return Err(RustGradError::InvalidArgument {
                 name: "num_features",
@@ -183,12 +179,12 @@ impl Dataset {
             let values: Vec<f64> = line
                 .split(',')
                 .map(|s| {
-                    s.trim().parse::<f64>().map_err(|_| {
-                        RustGradError::InvalidArgument {
+                    s.trim()
+                        .parse::<f64>()
+                        .map_err(|_| RustGradError::InvalidArgument {
                             name: "csv",
                             reason: format!("invalid float in line {}: '{s}'", line_idx + 1),
-                        }
-                    })
+                        })
                 })
                 .collect::<Result<Vec<_>>>()?;
 
@@ -310,8 +306,16 @@ impl Dataset {
         let test = self.batch(train_rows, n - train_rows)?;
 
         Ok((
-            Dataset::new(format!("{}_train", self.name), train.features().clone(), train.targets().clone())?,
-            Dataset::new(format!("{}_test", self.name), test.features().clone(), test.targets().clone())?,
+            Dataset::new(
+                format!("{}_train", self.name),
+                train.features().clone(),
+                train.targets().clone(),
+            )?,
+            Dataset::new(
+                format!("{}_test", self.name),
+                test.features().clone(),
+                test.targets().clone(),
+            )?,
         ))
     }
 }
@@ -941,12 +945,18 @@ mod tests {
     fn split_rejects_invalid_ratio() {
         let dataset = xor().expect("valid");
         let e0 = dataset.split(0.0).expect_err("zero ratio");
-        assert!(e0.to_string().contains("ratio must be finite and in (0, 1)"));
+        assert!(e0
+            .to_string()
+            .contains("ratio must be finite and in (0, 1)"));
 
         let e1 = dataset.split(1.0).expect_err("one ratio");
-        assert!(e1.to_string().contains("ratio must be finite and in (0, 1)"));
+        assert!(e1
+            .to_string()
+            .contains("ratio must be finite and in (0, 1)"));
 
         let enan = dataset.split(f64::NAN).expect_err("nan ratio");
-        assert!(enan.to_string().contains("ratio must be finite and in (0, 1)"));
+        assert!(enan
+            .to_string()
+            .contains("ratio must be finite and in (0, 1)"));
     }
 }

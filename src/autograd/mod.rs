@@ -282,16 +282,19 @@ impl ComputationGraph {
     /// implemented incrementally; unsupported non-leaf operations return a
     /// clear error instead of silently producing incorrect gradients.
     pub fn backward(&mut self, output: NodeId) -> Result<()> {
-        self.backward_with_grad(output, Tensor::ones(
-            self.node(output)
-                .ok_or_else(|| RustGradError::InvalidArgument {
-                    name: "node",
-                    reason: format!("node {} does not exist", output.index()),
-                })?
-                .value()
-                .shape()
-                .to_vec(),
-        )?)
+        self.backward_with_grad(
+            output,
+            Tensor::ones(
+                self.node(output)
+                    .ok_or_else(|| RustGradError::InvalidArgument {
+                        name: "node",
+                        reason: format!("node {} does not exist", output.index()),
+                    })?
+                    .value()
+                    .shape()
+                    .to_vec(),
+            )?,
+        )
     }
 
     /// Runs a backward pass from the output, seeding with an explicit gradient.
@@ -415,7 +418,9 @@ impl ComputationGraph {
             Operation::RowAdd => self.row_add_gradients(node.parents(), upstream_grad),
             Operation::Transpose => self.transpose_gradient(node.parents(), upstream_grad),
             Operation::Relu => self.relu_gradient(node.parents(), upstream_grad),
-            Operation::Sigmoid => self.sigmoid_gradient(node.parents(), node.value(), upstream_grad),
+            Operation::Sigmoid => {
+                self.sigmoid_gradient(node.parents(), node.value(), upstream_grad)
+            }
             Operation::Tanh => self.tanh_gradient(node.parents(), node.value(), upstream_grad),
             Operation::Softmax => {
                 self.softmax_gradient(node.parents(), node.value(), upstream_grad)
@@ -602,11 +607,7 @@ impl ComputationGraph {
         upstream_grad: &Tensor,
     ) -> Result<Vec<(NodeId, Tensor)>> {
         let (parent_id, _parent_value) = self.unary_parent_value(parents, "sigmoid")?;
-        let derivative_data: Vec<f64> = output
-            .data()
-            .iter()
-            .map(|&v| v * (1.0 - v))
-            .collect();
+        let derivative_data: Vec<f64> = output.data().iter().map(|&v| v * (1.0 - v)).collect();
         let derivative = Tensor::from_vec(output.shape().to_vec(), derivative_data)?;
         let grad = upstream_grad.mul(&derivative)?;
         Ok(vec![(parent_id, grad)])
@@ -619,11 +620,7 @@ impl ComputationGraph {
         upstream_grad: &Tensor,
     ) -> Result<Vec<(NodeId, Tensor)>> {
         let (parent_id, _parent_value) = self.unary_parent_value(parents, "tanh")?;
-        let derivative_data: Vec<f64> = output
-            .data()
-            .iter()
-            .map(|&v| 1.0 - v * v)
-            .collect();
+        let derivative_data: Vec<f64> = output.data().iter().map(|&v| 1.0 - v * v).collect();
         let derivative = Tensor::from_vec(output.shape().to_vec(), derivative_data)?;
         let grad = upstream_grad.mul(&derivative)?;
         Ok(vec![(parent_id, grad)])
@@ -1657,8 +1654,8 @@ mod tests {
                     if node_id == perturb_leaf {
                         values[index] = orig_value + epsilon;
                     }
-                    let tensor =
-                        Tensor::from_vec(node.value().shape().to_vec(), values).expect("valid tensor");
+                    let tensor = Tensor::from_vec(node.value().shape().to_vec(), values)
+                        .expect("valid tensor");
                     let new_id = new_graph.add_leaf(tensor, node.requires_grad());
                     id_map[i] = Some(new_id);
                 }
@@ -1669,12 +1666,8 @@ mod tests {
                         .map(|p| id_map[p.index()].expect("parent should be mapped"))
                         .collect();
                     // Recompute the actual value from parents instead of copying.
-                    let new_value = recompute_op(
-                        &new_graph,
-                        node.operation_kind(),
-                        &parents,
-                    )
-                    .expect("recompute op");
+                    let new_value = recompute_op(&new_graph, node.operation_kind(), &parents)
+                        .expect("recompute op");
                     let new_id = new_graph
                         .add_operation(
                             node.operation_kind().clone(),
@@ -1736,24 +1729,23 @@ mod tests {
             Tensor::matrix(2, 3, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).expect("valid matrix"),
             true,
         );
-        let input_t = graph.node(input).expect("leaf").value().transpose().expect("transpose");
+        let input_t = graph
+            .node(input)
+            .expect("leaf")
+            .value()
+            .transpose()
+            .expect("transpose");
         let output = graph
-            .add_operation(
-                Operation::Transpose,
-                vec![input],
-                input_t,
-                true,
-            )
+            .add_operation(Operation::Transpose, vec![input], input_t, true)
             .expect("parent should exist");
 
         // Transpose gradient: upstream (ones) transposed back.
         // For 2x3 -> 3x2 transpose, ones upstream gives all-ones grad.
-        graph.backward(output).expect("transpose backward should succeed");
+        graph
+            .backward(output)
+            .expect("transpose backward should succeed");
         assert_eq!(
-            graph
-                .node(input)
-                .and_then(|n| n.grad())
-                .map(|t| t.data()),
+            graph.node(input).and_then(|n| n.grad()).map(|t| t.data()),
             Some(&[1.0, 1.0, 1.0, 1.0, 1.0, 1.0][..])
         );
     }
@@ -1767,21 +1759,15 @@ mod tests {
         );
         let relu_val = crate::nn::relu(graph.node(input).expect("leaf").value()).expect("relu");
         let output = graph
-            .add_operation(
-                Operation::Relu,
-                vec![input],
-                relu_val,
-                true,
-            )
+            .add_operation(Operation::Relu, vec![input], relu_val, true)
             .expect("parent should exist");
 
-        graph.backward(output).expect("relu backward should succeed");
+        graph
+            .backward(output)
+            .expect("relu backward should succeed");
         // grad = upstream(1) * relu'(input) => 0 for <=0, 1 for >0
         assert_eq!(
-            graph
-                .node(input)
-                .and_then(|n| n.grad())
-                .map(|t| t.data()),
+            graph.node(input).and_then(|n| n.grad()).map(|t| t.data()),
             Some(&[0.0, 0.0, 1.0, 0.0, 1.0][..])
         );
     }
@@ -1799,7 +1785,9 @@ mod tests {
             .add_operation(Operation::Sigmoid, vec![input], output_val, true)
             .expect("parent should exist");
 
-        graph.backward(output).expect("sigmoid backward should succeed");
+        graph
+            .backward(output)
+            .expect("sigmoid backward should succeed");
 
         // sigmoid'(x) = sigmoid(x) * (1 - sigmoid(x))
         let s: Vec<f64> = input_val
@@ -1832,14 +1820,12 @@ mod tests {
             .add_operation(Operation::Tanh, vec![input], output_val, true)
             .expect("parent should exist");
 
-        graph.backward(output).expect("tanh backward should succeed");
+        graph
+            .backward(output)
+            .expect("tanh backward should succeed");
 
         // tanh'(x) = 1 - tanh(x)^2
-        let t: Vec<f64> = input_val
-            .data()
-            .iter()
-            .map(|&x| x.tanh())
-            .collect();
+        let t: Vec<f64> = input_val.data().iter().map(|&x| x.tanh()).collect();
         let expected: Vec<f64> = t.iter().map(|&v| 1.0 - v * v).collect();
 
         let grad = graph
@@ -1868,7 +1854,9 @@ mod tests {
             .add_operation(Operation::Softmax, vec![input], output_val, true)
             .expect("parent should exist");
 
-        graph.backward(output).expect("softmax backward should succeed");
+        graph
+            .backward(output)
+            .expect("softmax backward should succeed");
 
         let grad = graph
             .node(input)
@@ -1883,7 +1871,10 @@ mod tests {
             "softmax gradient should sum to zero, got {grad_sum}"
         );
         for &g in &grad {
-            assert!(g.abs() < 1e-10, "each softmax gradient should be ~0, got {g}");
+            assert!(
+                g.abs() < 1e-10,
+                "each softmax gradient should be ~0, got {g}"
+            );
         }
 
         // Also verify: dot = sum_j(s[j] * upstream[j]) = sum(s) = 1.0
@@ -1904,7 +1895,9 @@ mod tests {
             .add_operation(Operation::Softmax, vec![input], output_val, true)
             .expect("parent should exist");
 
-        graph.backward(output).expect("softmax backward should succeed");
+        graph
+            .backward(output)
+            .expect("softmax backward should succeed");
 
         let grad = graph
             .node(input)
@@ -1958,7 +1951,12 @@ mod tests {
             Tensor::matrix(2, 2, vec![2.0, 3.0, 5.0, 7.0]).expect("valid matrix"),
             true,
         );
-        let input_t = graph.node(input).expect("leaf").value().transpose().expect("transpose");
+        let input_t = graph
+            .node(input)
+            .expect("leaf")
+            .value()
+            .transpose()
+            .expect("transpose");
         let tr = graph
             .add_operation(Operation::Transpose, vec![input], input_t, true)
             .expect("transpose ok");
@@ -1977,10 +1975,7 @@ mod tests {
     #[test]
     fn relu_gradient_passes_finite_difference_check() {
         let mut graph = ComputationGraph::new();
-        let input = graph.add_leaf(
-            Tensor::vector(vec![1.5, -0.5]).expect("valid vector"),
-            true,
-        );
+        let input = graph.add_leaf(Tensor::vector(vec![1.5, -0.5]).expect("valid vector"), true);
         let relu_val = crate::nn::relu(graph.node(input).expect("leaf").value()).expect("relu");
         let r = graph
             .add_operation(Operation::Relu, vec![input], relu_val, true)
@@ -2000,11 +1995,9 @@ mod tests {
     #[test]
     fn sigmoid_gradient_passes_finite_difference_check() {
         let mut graph = ComputationGraph::new();
-        let input = graph.add_leaf(
-            Tensor::vector(vec![0.3, -0.7]).expect("valid vector"),
-            true,
-        );
-        let sig_val = crate::nn::sigmoid(graph.node(input).expect("leaf").value()).expect("sigmoid");
+        let input = graph.add_leaf(Tensor::vector(vec![0.3, -0.7]).expect("valid vector"), true);
+        let sig_val =
+            crate::nn::sigmoid(graph.node(input).expect("leaf").value()).expect("sigmoid");
         let s = graph
             .add_operation(Operation::Sigmoid, vec![input], sig_val, true)
             .expect("sigmoid ok");
@@ -2023,10 +2016,7 @@ mod tests {
     #[test]
     fn tanh_gradient_passes_finite_difference_check() {
         let mut graph = ComputationGraph::new();
-        let input = graph.add_leaf(
-            Tensor::vector(vec![0.8, -0.3]).expect("valid vector"),
-            true,
-        );
+        let input = graph.add_leaf(Tensor::vector(vec![0.8, -0.3]).expect("valid vector"), true);
         let tanh_val = crate::nn::tanh(graph.node(input).expect("leaf").value()).expect("tanh");
         let t = graph
             .add_operation(Operation::Tanh, vec![input], tanh_val, true)
