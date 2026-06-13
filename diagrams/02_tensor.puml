@@ -1,0 +1,77 @@
+@startuml Tensor
+!theme plain
+skinparam backgroundColor #FEFEFE
+skinparam defaultFontSize 13
+title Tensor 系统
+
+class Shape {
+  - dims: Vec<usize>
+  --
+  + new(dims) : Result<Shape>
+  + scalar() : Shape
+  + vector(len) : Result<Shape>
+  + matrix(rows, cols) : Result<Shape>
+  + dims() : &[usize]
+  + rank() : usize
+  + element_count() : usize
+  + is_scalar_like() : bool
+  + is_vector() : bool
+  + is_matrix() : bool
+  + rows() : Option<usize>
+  + cols() : Option<usize>
+  + offset(index) : Result<usize>
+}
+
+class Tensor {
+  - shape: Shape
+  - data: Vec<f64>
+  --
+  {static} + new(shape, data) : Result<Tensor>
+  {static} + scalar(value) : Result<Tensor>
+  {static} + vector(values) : Result<Tensor>
+  {static} + matrix(rows, cols, values) : Result<Tensor>
+  {static} + zeros(dims) : Result<Tensor>
+  {static} + ones(dims) : Result<Tensor>
+  {static} + full(dims, value) : Result<Tensor>
+  --
+  + shape() : &Shape
+  + dims() : &[usize]
+  + rank() : usize
+  + len() : usize
+  + data() : &[f64]
+  + data_mut() : &mut [f64]
+  --
+  + get(index) : Result<f64>
+  + set(index, value) : Result<()>
+  + get_flat(idx) : Result<f64>
+  + set_flat(idx, value) : Result<()>
+  --
+  + reshape(dims) : Result<Tensor>
+  + flatten() : Result<Tensor>
+  + transpose() : Result<Tensor>
+  + add(rhs) : Result<Tensor>
+  + sub(rhs) : Result<Tensor>
+  + mul(rhs) : Result<Tensor>
+  + div(rhs) : Result<Tensor>
+  + matmul(rhs) : Result<Tensor>
+  + row_add(bias) : Result<Tensor>
+  + sum() : Result<Tensor>
+  + mean() : Result<Tensor>
+  + sum_axis(axis) : Result<Tensor>
+  + mean_axis(axis) : Result<Tensor>
+}
+
+Tensor *-- Shape
+Tensor --> Shape : "shape 校验所有操作的合法性"
+
+note right of Tensor::matmul
+  三层循环实现
+  校验 rank-2 + 内维匹配
+end note
+
+note right of Tensor::row_add
+  向量广播到矩阵每行
+  用于 Linear 偏置
+end note
+
+@enduml

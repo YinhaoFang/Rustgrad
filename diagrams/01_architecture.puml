@@ -1,0 +1,69 @@
+@startuml RustGrad Architecture
+!theme plain
+skinparam backgroundColor #FEFEFE
+skinparam packageBackgroundColor #F5F5F5
+skinparam packageBorderColor #333333
+skinparam arrowColor #555555
+skinparam defaultFontSize 13
+title RustGrad 分层架构
+
+package "用户界面" as ui #E8F5E9 {
+  [CLI 命令] as cli
+  [报告导出] as report
+}
+
+package "训练编排" as orchestration #FFF3E0 {
+  [TrainingConfig] as config
+  [训练循环] as loop
+  [TrainingHistory] as history
+}
+
+package "学习组件" as learning #E3F2FD {
+  package "损失函数" as loss {
+    [MSELoss] as mse
+    [CrossEntropyLoss] as ce
+  }
+  package "优化器" as optim {
+    [SGD] as sgd
+    [Momentum] as momentum
+    [Adam] as adam
+  }
+  package "神经网络" as nn {
+    [Linear] as linear
+    [Sequential] as seq
+    [ReLU/Sigmoid/Tanh/Softmax] as act
+  }
+}
+
+package "自动求导引擎" as autograd #F3E5F5 {
+  [ComputationGraph] as graph
+  [GraphNode] as node
+  [12 种梯度规则] as rules
+}
+
+package "基础数值层" as tensor #FCE4EC {
+  [Tensor] as ten
+  [Shape] as shape
+}
+
+package "数据与持久化" as data #E0F2F1 {
+  [Dataset] as dataset
+  [CSV 加载] as csv
+  [模型序列化] as serialize
+}
+
+ui --> orchestration
+orchestration --> learning
+learning --> autograd
+autograd --> tensor
+orchestration --> data
+data --> tensor
+
+note right of autograd
+  <b>核心创新点</b>
+  backward_with_grad:
+  损失梯度手工种子
+  + 参数梯度自动传播
+end note
+
+@enduml

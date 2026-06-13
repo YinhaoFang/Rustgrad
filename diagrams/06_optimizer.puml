@@ -1,0 +1,88 @@
+@startuml Optimizer Hierarchy
+!theme plain
+skinparam backgroundColor #FEFEFE
+skinparam defaultFontSize 13
+title 优化器体系
+
+interface Optimizer {
+  + step(parameters, gradients) : Result<()>
+  + learning_rate() : f64
+  + set_learning_rate(lr) : Result<()>
+  + name() : &str
+}
+
+class GradientSet {
+  - gradients: Vec<Tensor>
+  --
+  + from_tensors(grads) : Self
+  + len() : usize
+  + get(index) : Option<&Tensor>
+  + iter() : impl Iterator
+  --
+  <i>独立于计算图的梯度容器
+  使优化器可脱离 autograd 测试</i>
+}
+
+class SGD {
+  - learning_rate: f64
+  --
+  + new(lr) : Result<Self>
+  --
+  <b>θ = θ - lr * g</b>
+}
+
+class Momentum {
+  - learning_rate: f64
+  - momentum: f64
+  - velocity: Vec<Tensor>
+  --
+  + new(lr, momentum) : Result<Self>
+  + momentum() : f64
+  + reset_state()
+  --
+  <b>v = β*v + g</b>
+  <b>θ = θ - lr*v</b>
+}
+
+class Adam {
+  - learning_rate: f64
+  - beta1: f64
+  - beta2: f64
+  - epsilon: f64
+  - timestep: usize
+  - first_moment: Vec<Tensor>
+  - second_moment: Vec<Tensor>
+  --
+  + new(lr) : Result<Self>
+  + with_hyperparameters(lr, β1, β2, ε) : Result<Self>
+  + timestep() : usize
+  + reset_state()
+  --
+  <b>m = β₁*m + (1-β₁)*g</b>
+  <b>v = β₂*v + (1-β₂)*g²</b>
+  <b>m̂ = m/(1-β₁ᵗ)</b>
+  <b>v̂ = v/(1-β₂ᵗ)</b>
+  <b>θ = θ - lr*m̂/(√v̂ + ε)</b>
+}
+
+Optimizer <|.. SGD
+Optimizer <|.. Momentum
+Optimizer <|.. Adam
+
+Optimizer ..> GradientSet : "step() 消费"
+
+note right of Adam
+  <b>偏差校正</b>
+  前几步 m/v 偏向 0
+  除以 (1-βᵗ) 校正
+  随 t 增长校正衰减 → 1
+end note
+
+note bottom of GradientSet
+  <b>形状安全</b>
+  step() 前校验
+  params 与 grads 形状一一匹配
+  不匹配则拒绝更新且不修改参数
+end note
+
+@enduml

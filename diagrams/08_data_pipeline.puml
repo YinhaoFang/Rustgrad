@@ -1,0 +1,89 @@
+@startuml Data Pipeline
+!theme plain
+skinparam backgroundColor #FEFEFE
+skinparam defaultFontSize 13
+title 数据与持久化管线
+
+class Dataset {
+  - name: String
+  - features: Tensor (rank-2)
+  - targets: Tensor (rank-2)
+  --
+  + new(name, features, targets) : Result<Self>
+  --
+  {static} <b>合成数据</b>
+  + linear_regression(samples, slope, intercept)
+  + xor()
+  + spiral(samples_per_class, classes)
+  --
+  {static} <b>外部数据 (0.2.0)</b>
+  + from_csv(name, text, num_features)
+  --
+  <b>数据工具 (0.2.0)</b>
+  + shuffle(seed) : Result<Dataset>
+  + split(ratio) : Result<(Dataset, Dataset)>
+  + batch(start, size) : Result<Dataset>
+  + iter_rows() : DatasetRowIterator
+  --
+  + sample(index) : Result<(Tensor, Tensor)>
+  + len() : usize
+  + input_size() : usize
+  + target_size() : usize
+}
+
+class DatasetRowIterator {
+  - dataset: &Dataset
+  - index: usize
+  --
+  <i>ExactSizeIterator</i>
+  <i>惰性按行产出 (x, y) 向量对</i>
+}
+
+class "序列化 (0.2.0)" as serialize {
+  + write_tensor(tensor, &mut String)
+  + read_tensor(text) : Result<(Tensor, usize)>
+  + save_linear(linear, path)
+  + load_linear(path) : Result<Linear>
+  + save_xor_mlp(model, path)
+  + load_xor_mlp(path) : Result<XorMlp>
+}
+
+class "Backend trait (0.2.0)" as backend {
+  + add / sub / mul / div
+  + matmul / transpose
+  + sum / mean / sum_axis / mean_axis
+  + row_add
+}
+
+class CpuBackend {
+  <i>零成本委托到 Tensor 方法</i>
+}
+
+Dataset --> DatasetRowIterator : iter_rows()
+Dataset --> serialize : "save/load 权重"
+backend <|.. CpuBackend
+
+note top of Dataset
+  <b>合成数据集特点</b>
+  确定性生成 → 跨平台可复现
+  XOR: 4 行真值表
+  Spiral: 极坐标公式
+end note
+
+note right of serialize
+  <b>纯文本格式</b>
+  2,2,2        ← rank,dims
+  1.00000...e0
+  2.00000...e0
+  ...
+  17 位精度, 人类可读
+end note
+
+note bottom of backend
+  <b>GPU 扩展预留</b>
+  trait 是 object-safe 的
+  未来 GpuBackend 实现同一 trait
+  Tensor<B: Backend> 泛型化
+end note
+
+@enduml

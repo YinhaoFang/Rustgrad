@@ -1,0 +1,70 @@
+@startuml Training Loop
+!theme plain
+skinparam backgroundColor #FEFEFE
+skinparam defaultFontSize 13
+title 单 Epoch 训练流程 (以 XOR MLP 为例)
+
+participant "TrainingConfig" as config
+participant "训练循环" as loop
+participant "XorMlp\n(hidden + output)" as model
+participant "ComputationGraph" as graph
+participant "SGD" as optim
+participant "TrainingHistory" as hist
+
+== 初始化 ==
+loop -> config: epochs=160, lr=0.4
+loop -> model: XorMlp::new(0.5)
+loop -> optim: SGD::new(0.4)
+
+== 每个 Epoch ==
+loop -> graph: <b>new() 新建图</b>
+
+group 构建计算图 (前向)
+  loop -> graph: add_leaf(features, false)
+  loop -> graph: add_leaf(weights_h, true)
+  loop -> graph: add_leaf(bias_h, true)
+  loop -> graph: add_leaf(weights_o, true)
+  loop -> graph: add_leaf(bias_o, true)
+  loop -> graph: add_operation(MatMul, ...)
+  loop -> graph: add_operation(RowAdd, ...)
+  loop -> graph: add_operation(Sigmoid, ...)
+  loop -> graph: add_operation(MatMul, ...)
+  loop -> graph: add_operation(RowAdd, ...)
+end
+
+group 损失梯度种子 (手工解析)
+  loop -> loop: <b>dL/dz = (σ(z) - target) / N</b>
+  note right: sigmoid+BCE 组合梯度\n公式极简, 易于验证
+end
+
+group 反向传播 (autograd)
+  loop -> graph: backward_with_grad(logits_node, seed)
+  graph -> graph: 拓扑排序 → 逆序遍历
+  graph -> graph: Sigmoid 梯度 → RowAdd 梯度 → MatMul 梯度
+  graph -> graph: 梯度累积到 4 个参数叶子节点
+end
+
+group 取出梯度 & 优化器更新
+  loop -> graph: take_gradients()
+  graph --> loop: [g_w_h, g_b_h, g_w_o, g_b_o]
+  loop -> model: parameters_mut()
+  loop -> optim: step(&mut params, &gradients)
+  optim -> optim: θ -= lr * g (逐元素)
+end
+
+group 评估 & 记录
+  loop -> model: predict_proba(features)
+  model --> loop: probabilities
+  loop -> loop: binary_cross_entropy()
+  loop -> loop: binary_accuracy()
+  loop -> hist: push(TrainingRecord { epoch, loss, accuracy })
+end
+
+... 重复 epochs 次 ...
+
+== 完成 ==
+loop -> hist: loss_decreased() → true
+loop -> hist: best_accuracy() → 1.0
+loop --> config: XorTrainingResult { model, history }
+
+@enduml
