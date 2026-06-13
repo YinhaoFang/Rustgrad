@@ -37,6 +37,15 @@ Main changes:
   13 data, 4 backend, 3 CLI integration, 3 existing CLI extensions). Clippy
   passes with zero warnings. Total test count: 292.
 
+Known limits:
+
+- GPU backend is architectural (trait + CpuBackend only); no actual GPU kernels;
+- serialization covers `Linear` and `XorMlp`, not generic `Sequential`;
+- no `--load-model` CLI flag for restoring weights before training;
+- `ComputationGraph` is rebuilt each epoch — not reused across steps;
+- softmax node in `train_spiral_classifier` does not participate in backward;
+- all training examples use full-batch gradient descent.
+
 ## 0.1.0
 
 RustGrad now has the main pieces needed for the course experiment. The project
@@ -105,6 +114,15 @@ trait 为未来的 GPU 后端奠定了架构基础。
 - **测试** — 新增 43 个测试（11 个 autograd 梯度 + 数值验证、9 个序列化、
   13 个数据、4 个后端、3 个 CLI 集成、3 个已有 CLI 扩展）。Clippy 零警告
   通过。总测试数：292。
+
+已知限制：
+
+- GPU 后端仅有 trait 接口，未实现实际 GPU kernel；
+- 序列化覆盖 Linear 和 XorMlp，不含泛化的 Sequential 容器；
+- CLI 尚未提供 `--load-model` 选项以在训练前恢复权重；
+- `ComputationGraph` 每 epoch 从零重建，未跨步骤复用；
+- `train_spiral_classifier` 的计算图中 Softmax 节点不参与反向传播；
+- 所有训练示例均使用全批量梯度下降（full-batch GD）。
 
 ## 0.1.0
 

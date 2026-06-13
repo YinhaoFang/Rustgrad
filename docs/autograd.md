@@ -20,19 +20,24 @@ and graph bookkeeping easy to inspect separately.
 
 ## Operation Model
 
-The `Operation` enum records how a node was created. Current built-in backward
-rules cover the operations used by the project examples:
+The `Operation` enum records how a node was created. All built-in operations
+used by the training examples have complete backward rules:
 
-- addition
-- subtraction
-- multiplication
-- division
+- addition, subtraction, multiplication, division
 - matrix multiplication
-- sum
-- mean
+- sum, mean
+- transpose
+- ReLU, Sigmoid, Tanh, Softmax
+- row-wise bias addition (RowAdd)
 
-Unsupported operations return a clear `UnsupportedOperation` error. This makes
-missing gradient rules explicit and helps prevent silent training mistakes.
+Gradient rules for activation functions (Sigmoid, Tanh) use output values
+rather than input values, avoiding redundant exponential evaluation.
+Softmax uses the vector-Jacobian product formulation
+`grad[i] = s[i] * (g[i] - Σ_j s[j] * g[j])`.
+
+Unsupported operations still return a clear `UnsupportedOperation` error,
+making missing gradient rules explicit and helping prevent silent training
+mistakes.
 
 ## Forward Pass
 
@@ -123,19 +128,22 @@ Rust 课程项目中清晰可见。
 
 ## 操作模型
 
-`Operation` 枚举记录节点的产生方式。当前内置反向规则覆盖项目示例需要的操
-作：
+`Operation` 枚举记录节点的产生方式。所有训练示例使用的内置操作均有完整的
+反向规则：
 
-- 加法
-- 减法
-- 乘法
-- 除法
+- 加法、减法、乘法、除法
 - 矩阵乘法
-- 求和
-- 均值
+- 求和、均值
+- 转置
+- ReLU、Sigmoid、Tanh、Softmax
+- 行方向偏置加法（RowAdd）
 
-不支持的操作会返回清晰的 `UnsupportedOperation` 错误。这样可以显式暴露缺
-失的梯度规则，减少静默训练错误。
+激活函数（Sigmoid、Tanh）的梯度规则使用输出值而非输入值计算导数，避免重复
+指数运算。Softmax 使用向量-雅可比积公式
+`grad[i] = s[i] * (g[i] - Σ_j s[j] * g[j])`。
+
+不支持的操作会返回清晰的 `UnsupportedOperation` 错误。这样可以显式暴露缺失
+的梯度规则，减少静默训练错误。
 
 ## 前向传播
 

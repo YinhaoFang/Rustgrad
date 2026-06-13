@@ -108,6 +108,37 @@ SGD, Momentum, and Adam use the same interface. The current training examples
 use SGD for readability, while the optimizer module tests verify the other
 optimizers independently.
 
+## Graph-Based Gradient Propagation
+
+Starting from 0.2.0, all training loops build a `ComputationGraph` each epoch
+and propagate gradients with `backward_with_grad`. The flow is:
+
+1. Insert features as non-trainable leaf, weights and bias as trainable leaves.
+2. Build forward operations: `MatMul → RowAdd → (optional activation)`.
+3. Compute the combined loss gradient analytically (e.g. MSE:
+   `(2/N)*(pred - target)`, sigmoid+BCE: `(σ(logits) - t)/N`, softmax+CE:
+   `(softmax(logits) - targets)/N`).
+4. Seed the output node with this loss gradient via `backward_with_grad`.
+5. Take accumulated gradients from leaf nodes via `take_gradients`.
+6. Pass gradients to the optimizer.
+
+This approach combines the clarity of analytical loss gradients (easy to verify
+in a report) with the generality of graph-based parameter gradient propagation
+(correct through any activation or intermediate operation).
+
+## Model Checkpoint
+
+The CLI supports exporting trained model parameters:
+
+```bash
+cargo run -- train-linear --epochs 120 --save-model runs/linear.checkpoint
+cargo run -- train-xor --epochs 160 --save-model runs/xor.checkpoint
+```
+
+Checkpoint files use a plain-text format: a header line with rank and
+dimensions, followed by one `f64` value per line. The `serialize` module
+provides `load_linear` and `load_xor_mlp` for programmatic reloading.
+
 ## Reports
 
 The CLI can export report files with `--output DIR`:
@@ -222,6 +253,34 @@ cargo run -- train-spiral --epochs 160 --learning-rate 0.7 --samples-per-class 1
 
 SGD、Momentum 和 Adam 都使用同样接口。当前训练示例为了可读性使用 SGD，其
 他优化器通过 `optim` 模块测试单独验证。
+
+## 基于计算图的梯度传播
+
+从 0.2.0 开始，所有训练循环每 epoch 构建一次 `ComputationGraph` 并通过
+`backward_with_grad` 传播梯度。流程如下：
+
+1. 将特征作为不可训练叶节点、权重和偏置作为可训练叶节点插入。
+2. 构建前向操作链：`MatMul → RowAdd → （可选激活函数）`。
+3. 解析计算组合损失梯度（如 MSE：`(2/N)*(pred - target)`，sigmoid+BCE：
+   `(σ(logits) - t)/N`，softmax+CE：`(softmax(logits) - targets)/N`）。
+4. 将损失梯度作为种子传入 `backward_with_grad`。
+5. 通过 `take_gradients` 取出叶节点的累积梯度。
+6. 将梯度交给优化器。
+
+这种方案结合了解析损失梯度的清晰性（便于在报告中验证）和计算图梯度传播的
+通用性（可正确处理任意激活函数和中间操作）。
+
+## 模型保存
+
+CLI 支持导出训练好的模型参数：
+
+```bash
+cargo run -- train-linear --epochs 120 --save-model runs/linear.checkpoint
+cargo run -- train-xor --epochs 160 --save-model runs/xor.checkpoint
+```
+
+Checkpoint 文件使用纯文本格式：rank,dims 标头行 + 每行一个 f64 值。
+`serialize` 模块提供 `load_linear` 和 `load_xor_mlp` 供编程加载。
 
 ## 报告导出
 
