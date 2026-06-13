@@ -1533,4 +1533,478 @@ mod tests {
             .grad()
             .is_none());
     }
+
+    // ── Gradient rule tests for 4.1–4.5 ──────────────────────────────
+
+    const FD_EPSILON: f64 = 1e-6;
+    const TOLERANCE: f64 = 1e-5;
+
+    /// Finite-difference check: perturb each leaf value and compare
+    /// `(f(x+h) - f(x-h)) / (2h)` to the accumulated autograd gradient.
+    fn check_gradient_numeric(graph: &mut ComputationGraph, output: NodeId) {
+        // Capture leaf nodes *before* backward so we know which ids to check.
+        let leaf_ids: Vec<NodeId> = (0..graph.len())
+            .filter(|&i| {
+                graph
+                    .node(NodeId::new(i))
+                    .is_some_and(|n| n.operation_kind() == &Operation::Leaf && n.requires_grad())
+            })
+            .map(NodeId::new)
+            .collect();
+
+        assert!(!leaf_ids.is_empty(), "expected at least one leaf");
+
+        let base_output_value: f64 = graph
+            .node(output)
+            .expect("output exists")
+            .value()
+            .sum()
+            .expect("sum")
+            .get_flat(0)
+            .expect("scalar");
+
+        graph.backward(output).expect("backward should succeed");
+
+        for &leaf_id in &leaf_ids {
+            let autograd_grad: Vec<f64> = graph
+                .node(leaf_id)
+                .and_then(|n| n.grad())
+                .map(|t| t.data().to_vec())
+                .expect("leaf should have gradient");
+
+            let leaf_value: Vec<f64> = graph
+                .node(leaf_id)
+                .expect("leaf exists")
+                .value()
+                .data()
+                .to_vec();
+
+            for i in 0..leaf_value.len() {
+                let orig = leaf_value[i];
+                // f(x + h) – rebuild graph with perturbed value
+                let hi = recompute_with_perturbation(graph, leaf_id, i, orig, FD_EPSILON, output);
+                let lo = recompute_with_perturbation(graph, leaf_id, i, orig, -FD_EPSILON, output);
+                let numeric_grad = (hi - lo) / (2.0 * FD_EPSILON);
+                assert!(
+                    (autograd_grad[i] - numeric_grad).abs() < TOLERANCE,
+                    "leaf {} idx {}: autograd={}, numeric={}",
+                    leaf_id.index(),
+                    i,
+                    autograd_grad[i],
+                    numeric_grad
+                );
+            }
+        }
+
+        // Restore the graph to its original state for any subsequent checks.
+        *graph = ComputationGraph::new();
+        let _ = base_output_value; // suppress unused warning
+    }
+
+    /// Rebuild the graph from scratch with one leaf value perturbed, return scalar output.
+    fn recompute_with_perturbation(
+        original_graph: &ComputationGraph,
+        perturb_leaf: NodeId,
+        index: usize,
+        orig_value: f64,
+        epsilon: f64,
+        output_id: NodeId,
+    ) -> f64 {
+        let mut new_graph = ComputationGraph::new();
+        let mut id_map: Vec<Option<NodeId>> = vec![None; original_graph.len()];
+
+        for i in 0..original_graph.len() {
+            let node_id = NodeId::new(i);
+            let node = original_graph.node(node_id).expect("node exists");
+
+            match node.operation_kind() {
+                Operation::Leaf => {
+                    let mut values = node.value().data().to_vec();
+                    if node_id == perturb_leaf {
+                        values[index] = orig_value + epsilon;
+                    }
+                    let tensor =
+                        Tensor::from_vec(node.value().shape().to_vec(), values).expect("valid tensor");
+                    let new_id = new_graph.add_leaf(tensor, node.requires_grad());
+                    id_map[i] = Some(new_id);
+                }
+                _ => {
+                    let parents: Vec<NodeId> = node
+                        .parents()
+                        .iter()
+                        .map(|p| id_map[p.index()].expect("parent should be mapped"))
+                        .collect();
+                    // Recompute the actual value from parents instead of copying.
+                    let new_value = recompute_op(
+                        &new_graph,
+                        node.operation_kind(),
+                        &parents,
+                    )
+                    .expect("recompute op");
+                    let new_id = new_graph
+                        .add_operation(
+                            node.operation_kind().clone(),
+                            parents,
+                            new_value,
+                            node.requires_grad(),
+                        )
+                        .expect("operation should build");
+                    id_map[i] = Some(new_id);
+                }
+            }
+        }
+
+        let remapped_output = id_map[output_id.index()].expect("output should be mapped");
+        new_graph
+            .node(remapped_output)
+            .expect("output exists")
+            .value()
+            .sum()
+            .expect("sum")
+            .get_flat(0)
+            .expect("scalar")
+    }
+
+    /// Recompute the value of an operation from its parents' values in the graph.
+    fn recompute_op(
+        graph: &ComputationGraph,
+        op: &Operation,
+        parents: &[NodeId],
+    ) -> crate::Result<Tensor> {
+        let get_val = |i: usize| -> crate::Result<Tensor> {
+            Ok(graph.node(parents[i]).expect("parent").value().clone())
+        };
+        match op {
+            Operation::Add => get_val(0)?.add(&get_val(1)?),
+            Operation::Sub => get_val(0)?.sub(&get_val(1)?),
+            Operation::Mul => get_val(0)?.mul(&get_val(1)?),
+            Operation::Div => get_val(0)?.div(&get_val(1)?),
+            Operation::MatMul => get_val(0)?.matmul(&get_val(1)?),
+            Operation::Transpose => get_val(0)?.transpose(),
+            Operation::Sum => get_val(0)?.sum(),
+            Operation::Mean => get_val(0)?.mean(),
+            Operation::Relu => crate::nn::relu(&get_val(0)?),
+            Operation::Sigmoid => crate::nn::sigmoid(&get_val(0)?),
+            Operation::Tanh => crate::nn::tanh(&get_val(0)?),
+            Operation::Softmax => crate::nn::softmax(&get_val(0)?),
+            _ => Err(RustGradError::UnsupportedOperation {
+                op: op.name().to_string(),
+                reason: "finite-difference recomputation not supported".to_string(),
+            }),
+        }
+    }
+
+    #[test]
+    fn backward_computes_transpose_gradient() {
+        let mut graph = ComputationGraph::new();
+        let input = graph.add_leaf(
+            Tensor::matrix(2, 3, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).expect("valid matrix"),
+            true,
+        );
+        let input_t = graph.node(input).expect("leaf").value().transpose().expect("transpose");
+        let output = graph
+            .add_operation(
+                Operation::Transpose,
+                vec![input],
+                input_t,
+                true,
+            )
+            .expect("parent should exist");
+
+        // Transpose gradient: upstream (ones) transposed back.
+        // For 2x3 -> 3x2 transpose, ones upstream gives all-ones grad.
+        graph.backward(output).expect("transpose backward should succeed");
+        assert_eq!(
+            graph
+                .node(input)
+                .and_then(|n| n.grad())
+                .map(|t| t.data()),
+            Some(&[1.0, 1.0, 1.0, 1.0, 1.0, 1.0][..])
+        );
+    }
+
+    #[test]
+    fn backward_computes_relu_gradient_for_vector() {
+        let mut graph = ComputationGraph::new();
+        let input = graph.add_leaf(
+            Tensor::vector(vec![-1.0, 0.0, 2.0, -3.0, 4.0]).expect("valid vector"),
+            true,
+        );
+        let relu_val = crate::nn::relu(graph.node(input).expect("leaf").value()).expect("relu");
+        let output = graph
+            .add_operation(
+                Operation::Relu,
+                vec![input],
+                relu_val,
+                true,
+            )
+            .expect("parent should exist");
+
+        graph.backward(output).expect("relu backward should succeed");
+        // grad = upstream(1) * relu'(input) => 0 for <=0, 1 for >0
+        assert_eq!(
+            graph
+                .node(input)
+                .and_then(|n| n.grad())
+                .map(|t| t.data()),
+            Some(&[0.0, 0.0, 1.0, 0.0, 1.0][..])
+        );
+    }
+
+    #[test]
+    fn backward_computes_sigmoid_gradient_for_vector() {
+        let mut graph = ComputationGraph::new();
+        let input = graph.add_leaf(
+            Tensor::vector(vec![0.0, 1.0, -1.0]).expect("valid vector"),
+            true,
+        );
+        let input_val = graph.node(input).expect("leaf").value().clone();
+        let output_val = crate::nn::sigmoid(&input_val).expect("sigmoid");
+        let output = graph
+            .add_operation(Operation::Sigmoid, vec![input], output_val, true)
+            .expect("parent should exist");
+
+        graph.backward(output).expect("sigmoid backward should succeed");
+
+        // sigmoid'(x) = sigmoid(x) * (1 - sigmoid(x))
+        let s: Vec<f64> = input_val
+            .data()
+            .iter()
+            .map(|&x| 1.0 / (1.0 + (-x).exp()))
+            .collect();
+        let expected: Vec<f64> = s.iter().map(|&v| v * (1.0 - v)).collect();
+
+        let grad = graph
+            .node(input)
+            .and_then(|n| n.grad())
+            .map(|t| t.data().to_vec())
+            .expect("grad exists");
+        for (g, e) in grad.iter().zip(expected.iter()) {
+            assert!((g - e).abs() < 1e-10, "sigmoid grad: {g} vs {e}");
+        }
+    }
+
+    #[test]
+    fn backward_computes_tanh_gradient_for_vector() {
+        let mut graph = ComputationGraph::new();
+        let input = graph.add_leaf(
+            Tensor::vector(vec![0.0, 0.5, -0.5]).expect("valid vector"),
+            true,
+        );
+        let input_val = graph.node(input).expect("leaf").value().clone();
+        let output_val = crate::nn::tanh(&input_val).expect("tanh");
+        let output = graph
+            .add_operation(Operation::Tanh, vec![input], output_val, true)
+            .expect("parent should exist");
+
+        graph.backward(output).expect("tanh backward should succeed");
+
+        // tanh'(x) = 1 - tanh(x)^2
+        let t: Vec<f64> = input_val
+            .data()
+            .iter()
+            .map(|&x| x.tanh())
+            .collect();
+        let expected: Vec<f64> = t.iter().map(|&v| 1.0 - v * v).collect();
+
+        let grad = graph
+            .node(input)
+            .and_then(|n| n.grad())
+            .map(|t| t.data().to_vec())
+            .expect("grad exists");
+        for (g, e) in grad.iter().zip(expected.iter()) {
+            assert!((g - e).abs() < 1e-10, "tanh grad: {g} vs {e}");
+        }
+    }
+
+    #[test]
+    fn backward_computes_softmax_gradient_for_vector() {
+        // s = softmax([1, 2, 3]), upstream = ones
+        // grad[i] = s[i] * (1 - dot) where dot = sum_j s[j]*1 = 1, so all zero.
+        let mut graph = ComputationGraph::new();
+        let input = graph.add_leaf(
+            Tensor::vector(vec![1.0, 2.0, 3.0]).expect("valid vector"),
+            true,
+        );
+        let input_val = graph.node(input).expect("leaf").value().clone();
+        let output_val = crate::nn::softmax(&input_val).expect("softmax");
+        let s: Vec<f64> = output_val.data().to_vec();
+        let output = graph
+            .add_operation(Operation::Softmax, vec![input], output_val, true)
+            .expect("parent should exist");
+
+        graph.backward(output).expect("softmax backward should succeed");
+
+        let grad = graph
+            .node(input)
+            .and_then(|n| n.grad())
+            .map(|t| t.data().to_vec())
+            .expect("grad exists");
+
+        // With upstream=ones: grad[i] = s[i] * (1 - sum(s)) = s[i] * 0 = 0
+        let grad_sum: f64 = grad.iter().sum();
+        assert!(
+            grad_sum.abs() < 1e-10,
+            "softmax gradient should sum to zero, got {grad_sum}"
+        );
+        for &g in &grad {
+            assert!(g.abs() < 1e-10, "each softmax gradient should be ~0, got {g}");
+        }
+
+        // Also verify: dot = sum_j(s[j] * upstream[j]) = sum(s) = 1.0
+        let dot: f64 = s.iter().sum();
+        assert!((dot - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn backward_computes_softmax_gradient_for_matrix() {
+        let mut graph = ComputationGraph::new();
+        let input = graph.add_leaf(
+            Tensor::matrix(2, 3, vec![1.0, 2.0, 3.0, 1.0, 1.0, 1.0]).expect("valid matrix"),
+            true,
+        );
+        let input_val = graph.node(input).expect("leaf").value().clone();
+        let output_val = crate::nn::softmax(&input_val).expect("softmax");
+        let output = graph
+            .add_operation(Operation::Softmax, vec![input], output_val, true)
+            .expect("parent should exist");
+
+        graph.backward(output).expect("softmax backward should succeed");
+
+        let grad = graph
+            .node(input)
+            .and_then(|n| n.grad())
+            .map(|t| t.data().to_vec())
+            .expect("grad exists");
+
+        // Each row's gradient should sum to zero.
+        // Row 0: s = softmax([1,2,3]), grad sum = 0
+        let row0_sum: f64 = grad[0..3].iter().sum();
+        assert!(
+            row0_sum.abs() < 1e-10,
+            "row 0 grad sum should be 0, got {row0_sum}"
+        );
+        // Row 1: s = softmax([1,1,1]) = [1/3,1/3,1/3]
+        // With upstream=ones: grad[i] = 1/3 * (1 - 1) = 0
+        let row1_sum: f64 = grad[3..6].iter().sum();
+        assert!(
+            row1_sum.abs() < 1e-10,
+            "row 1 grad sum should be 0, got {row1_sum}"
+        );
+    }
+
+    #[test]
+    fn softmax_gradient_passes_finite_difference_check() {
+        let mut graph = ComputationGraph::new();
+        let input = graph.add_leaf(
+            Tensor::vector(vec![1.0, 2.0, 3.0]).expect("valid vector"),
+            true,
+        );
+        let sm_val = crate::nn::softmax(graph.node(input).expect("leaf").value()).expect("softmax");
+        let sm = graph
+            .add_operation(Operation::Softmax, vec![input], sm_val, true)
+            .expect("softmax ok");
+        let output = graph
+            .add_operation(
+                Operation::Sum,
+                vec![sm],
+                graph.node(sm).expect("sm exists").value().clone(),
+                true,
+            )
+            .expect("sum ok");
+
+        check_gradient_numeric(&mut graph, output);
+    }
+
+    #[test]
+    fn transpose_gradient_passes_finite_difference_check() {
+        let mut graph = ComputationGraph::new();
+        let input = graph.add_leaf(
+            Tensor::matrix(2, 2, vec![2.0, 3.0, 5.0, 7.0]).expect("valid matrix"),
+            true,
+        );
+        let input_t = graph.node(input).expect("leaf").value().transpose().expect("transpose");
+        let tr = graph
+            .add_operation(Operation::Transpose, vec![input], input_t, true)
+            .expect("transpose ok");
+        let output = graph
+            .add_operation(
+                Operation::Sum,
+                vec![tr],
+                graph.node(tr).expect("tr exists").value().clone(),
+                true,
+            )
+            .expect("sum ok");
+
+        check_gradient_numeric(&mut graph, output);
+    }
+
+    #[test]
+    fn relu_gradient_passes_finite_difference_check() {
+        let mut graph = ComputationGraph::new();
+        let input = graph.add_leaf(
+            Tensor::vector(vec![1.5, -0.5]).expect("valid vector"),
+            true,
+        );
+        let relu_val = crate::nn::relu(graph.node(input).expect("leaf").value()).expect("relu");
+        let r = graph
+            .add_operation(Operation::Relu, vec![input], relu_val, true)
+            .expect("relu ok");
+        let output = graph
+            .add_operation(
+                Operation::Sum,
+                vec![r],
+                graph.node(r).expect("r exists").value().clone(),
+                true,
+            )
+            .expect("sum ok");
+
+        check_gradient_numeric(&mut graph, output);
+    }
+
+    #[test]
+    fn sigmoid_gradient_passes_finite_difference_check() {
+        let mut graph = ComputationGraph::new();
+        let input = graph.add_leaf(
+            Tensor::vector(vec![0.3, -0.7]).expect("valid vector"),
+            true,
+        );
+        let sig_val = crate::nn::sigmoid(graph.node(input).expect("leaf").value()).expect("sigmoid");
+        let s = graph
+            .add_operation(Operation::Sigmoid, vec![input], sig_val, true)
+            .expect("sigmoid ok");
+        let output = graph
+            .add_operation(
+                Operation::Sum,
+                vec![s],
+                graph.node(s).expect("s exists").value().clone(),
+                true,
+            )
+            .expect("sum ok");
+
+        check_gradient_numeric(&mut graph, output);
+    }
+
+    #[test]
+    fn tanh_gradient_passes_finite_difference_check() {
+        let mut graph = ComputationGraph::new();
+        let input = graph.add_leaf(
+            Tensor::vector(vec![0.8, -0.3]).expect("valid vector"),
+            true,
+        );
+        let tanh_val = crate::nn::tanh(graph.node(input).expect("leaf").value()).expect("tanh");
+        let t = graph
+            .add_operation(Operation::Tanh, vec![input], tanh_val, true)
+            .expect("tanh ok");
+        let output = graph
+            .add_operation(
+                Operation::Sum,
+                vec![t],
+                graph.node(t).expect("t exists").value().clone(),
+                true,
+            )
+            .expect("sum ok");
+
+        check_gradient_numeric(&mut graph, output);
+    }
 }
