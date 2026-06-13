@@ -140,13 +140,13 @@ pub fn load_xor_mlp(path: &Path) -> Result<XorMlp> {
     let offset = offset + c3;
     let (output_bias, _) = read_tensor(&content[offset..])?;
 
-    Ok(XorMlp::from_parameters(
+    XorMlp::from_parameters(
         hidden_weights,
         hidden_bias,
         output_weights,
         output_bias,
         0.5,
-    )?)
+    )
 }
 
 #[cfg(test)]
