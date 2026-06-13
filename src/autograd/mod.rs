@@ -393,6 +393,13 @@ impl ComputationGraph {
             Operation::MatMul => self.matmul_gradients(node.parents(), upstream_grad),
             Operation::Sum => self.sum_gradient(node.parents(), upstream_grad),
             Operation::Mean => self.mean_gradient(node.parents(), upstream_grad),
+            Operation::Transpose => self.transpose_gradient(node.parents(), upstream_grad),
+            Operation::Relu => self.relu_gradient(node.parents(), upstream_grad),
+            Operation::Sigmoid => self.sigmoid_gradient(node.parents(), node.value(), upstream_grad),
+            Operation::Tanh => self.tanh_gradient(node.parents(), node.value(), upstream_grad),
+            Operation::Softmax => {
+                self.softmax_gradient(node.parents(), node.value(), upstream_grad)
+            }
             operation => Err(RustGradError::UnsupportedOperation {
                 op: operation.name().to_string(),
                 reason: format!(
@@ -528,6 +535,87 @@ impl ComputationGraph {
         Ok(vec![(parent_id, grad)])
     }
 
+    fn transpose_gradient(
+        &self,
+        parents: &[NodeId],
+        upstream_grad: &Tensor,
+    ) -> Result<Vec<(NodeId, Tensor)>> {
+        let (parent_id, _parent_value) = self.unary_parent_value(parents, "transpose")?;
+        let grad = upstream_grad.transpose()?;
+        Ok(vec![(parent_id, grad)])
+    }
+
+    fn relu_gradient(
+        &self,
+        parents: &[NodeId],
+        upstream_grad: &Tensor,
+    ) -> Result<Vec<(NodeId, Tensor)>> {
+        let (parent_id, parent_value) = self.unary_parent_value(parents, "relu")?;
+        let derivative_data: Vec<f64> = parent_value
+            .data()
+            .iter()
+            .map(|&v| if v > 0.0 { 1.0 } else { 0.0 })
+            .collect();
+        let derivative = Tensor::from_vec(parent_value.shape().to_vec(), derivative_data)?;
+        let grad = upstream_grad.mul(&derivative)?;
+        Ok(vec![(parent_id, grad)])
+    }
+
+    fn sigmoid_gradient(
+        &self,
+        parents: &[NodeId],
+        output: &Tensor,
+        upstream_grad: &Tensor,
+    ) -> Result<Vec<(NodeId, Tensor)>> {
+        let (parent_id, _parent_value) = self.unary_parent_value(parents, "sigmoid")?;
+        let derivative_data: Vec<f64> = output
+            .data()
+            .iter()
+            .map(|&v| v * (1.0 - v))
+            .collect();
+        let derivative = Tensor::from_vec(output.shape().to_vec(), derivative_data)?;
+        let grad = upstream_grad.mul(&derivative)?;
+        Ok(vec![(parent_id, grad)])
+    }
+
+    fn tanh_gradient(
+        &self,
+        parents: &[NodeId],
+        output: &Tensor,
+        upstream_grad: &Tensor,
+    ) -> Result<Vec<(NodeId, Tensor)>> {
+        let (parent_id, _parent_value) = self.unary_parent_value(parents, "tanh")?;
+        let derivative_data: Vec<f64> = output
+            .data()
+            .iter()
+            .map(|&v| 1.0 - v * v)
+            .collect();
+        let derivative = Tensor::from_vec(output.shape().to_vec(), derivative_data)?;
+        let grad = upstream_grad.mul(&derivative)?;
+        Ok(vec![(parent_id, grad)])
+    }
+
+    fn softmax_gradient(
+        &self,
+        parents: &[NodeId],
+        output: &Tensor,
+        upstream_grad: &Tensor,
+    ) -> Result<Vec<(NodeId, Tensor)>> {
+        let (parent_id, _parent_value) = self.unary_parent_value(parents, "softmax")?;
+        let grad_data = match output.rank() {
+            1 => softmax_gradient_slice(output.data(), upstream_grad.data()),
+            2 => softmax_gradient_matrix(output, upstream_grad)?,
+            rank => {
+                return Err(RustGradError::InvalidArgument {
+                    name: "rank",
+                    reason: format!("softmax gradient supports rank 1 or 2, got rank {rank}"),
+                })
+            }
+        };
+        let grad = Tensor::from_vec(output.shape().to_vec(), grad_data)?;
+        Ok(vec![(parent_id, grad)])
+    }
+
     fn binary_parent_values(
         &self,
         parents: &[NodeId],
@@ -614,6 +702,39 @@ impl ComputationGraph {
             right: upstream_grad.shape().to_vec(),
         })
     }
+}
+
+/// Computes per-element softmax gradient for a single row.
+///
+/// Given softmax output `s` and upstream gradient `g`, returns
+/// `grad[i] = s[i] * (g[i] - sum_j(s[j] * g[j]))`.
+fn softmax_gradient_slice(softmax_output: &[f64], upstream: &[f64]) -> Vec<f64> {
+    let dot: f64 = softmax_output
+        .iter()
+        .zip(upstream.iter())
+        .map(|(&s, &g)| s * g)
+        .sum();
+    softmax_output
+        .iter()
+        .zip(upstream.iter())
+        .map(|(&s, &g)| s * (g - dot))
+        .collect()
+}
+
+/// Computes row-wise softmax gradient for a rank-2 tensor.
+fn softmax_gradient_matrix(output: &Tensor, upstream_grad: &Tensor) -> Result<Vec<f64>> {
+    let rows = output.rows().expect("rank 2 tensors always have rows");
+    let cols = output.cols().expect("rank 2 tensors always have columns");
+    let mut grad = Vec::with_capacity(output.len());
+    for row in 0..rows {
+        let start = row * cols;
+        let end = start + cols;
+        grad.extend(softmax_gradient_slice(
+            &output.data()[start..end],
+            &upstream_grad.data()[start..end],
+        ));
+    }
+    Ok(grad)
 }
 
 #[cfg(test)]
@@ -818,9 +939,9 @@ mod tests {
         );
         let output = graph
             .add_operation(
-                Operation::Transpose,
+                Operation::Custom("unsupported-op".to_string()),
                 vec![input],
-                Tensor::matrix(1, 2, vec![1.0, 2.0]).expect("valid matrix"),
+                Tensor::matrix(2, 1, vec![1.0, 2.0]).expect("valid matrix"),
                 true,
             )
             .expect("parent should exist");
@@ -828,10 +949,10 @@ mod tests {
         assert_eq!(
             graph
                 .backward(output)
-                .expect_err("transpose gradient rule is not implemented yet"),
+                .expect_err("custom unsupported operation should fail"),
             RustGradError::UnsupportedOperation {
-                op: "transpose".to_string(),
-                reason: "gradient rule is not implemented yet for upstream shape [1, 2]"
+                op: "unsupported-op".to_string(),
+                reason: "gradient rule is not implemented yet for upstream shape [2, 1]"
                     .to_string(),
             }
         );
